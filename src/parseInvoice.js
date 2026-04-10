@@ -1,5 +1,5 @@
 /**
- * parseInvoice.ts
+ * parseInvoice.js
  *
  * All regex / heuristic logic for extracting structured invoice fields
  * from raw OCR or embedded-PDF text.
@@ -14,11 +14,9 @@
  *  - IGIC % / amount / base (possibly multiple tranches → pipe-separated)
  */
 
-import type { CompanySettings, IgicEntry, InvoiceType, ParsedInvoice } from './types.js';
-
 // ─── Spanish month names ──────────────────────────────────────────────────────
 
-const MONTH_MAP: Record<string, number> = {
+const MONTH_MAP = {
   enero: 1, febrero: 2, marzo: 3, abril: 4, mayo: 5, junio: 6,
   julio: 7, agosto: 8, septiembre: 9, octubre: 10, noviembre: 11, diciembre: 12,
   // common abbreviations
@@ -35,13 +33,16 @@ const MONTH_MAP: Record<string, number> = {
  *   YYYY/MM/DD  YYYY-MM-DD
  *   DD de MONTH de YYYY  (Spanish long form)
  *   DD MONTH YYYY
+ *
+ * @param {string} text
+ * @returns {Date[]}
  */
-export function extractDates(text: string): Date[] {
-  const dates: Date[] = [];
+export function extractDates(text) {
+  const dates = [];
 
   // DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
   const reNumeric = /\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\b/g;
-  let m: RegExpExecArray | null;
+  let m;
   while ((m = reNumeric.exec(text)) !== null) {
     const d = Number(m[1]);
     const mo = Number(m[2]);
@@ -80,7 +81,13 @@ export function extractDates(text: string): Date[] {
   return dates;
 }
 
-function isValidDate(y: number, mo: number, d: number): boolean {
+/**
+ * @param {number} y
+ * @param {number} mo
+ * @param {number} d
+ * @returns {boolean}
+ */
+function isValidDate(y, mo, d) {
   if (y < 1990 || y > 2100) return false;
   if (mo < 1 || mo > 12) return false;
   if (d < 1 || d > 31) return false;
@@ -92,16 +99,22 @@ function isValidDate(y: number, mo: number, d: number): boolean {
 /**
  * Choose the latest date from an array.
  * Returns null when the array is empty.
+ *
+ * @param {Date[]} dates
+ * @returns {Date|null}
  */
-export function chooseBestDate(dates: Date[]): Date | null {
+export function chooseBestDate(dates) {
   if (dates.length === 0) return null;
   return dates.reduce((best, d) => (d > best ? d : best), dates[0]);
 }
 
 /**
  * Format a Date as DD/MM/YYYY (European convention).
+ *
+ * @param {Date} d
+ * @returns {string}
  */
-export function formatDate(d: Date): string {
+export function formatDate(d) {
   const dd = String(d.getDate()).padStart(2, '0');
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const yyyy = String(d.getFullYear());
@@ -114,8 +127,11 @@ export function formatDate(d: Date): string {
  * Parse a number string that may use either European (1.234,56) or
  * Anglo-Saxon (1,234.56) formatting.
  * Returns a plain JS number, or NaN on failure.
+ *
+ * @param {string} raw
+ * @returns {number}
  */
-export function parseEuropeanNumber(raw: string): number {
+export function parseEuropeanNumber(raw) {
   const cleaned = raw.trim().replace(/\s/g, '');
   // Detect European: has comma as decimal separator
   if (/^\d{1,3}(\.\d{3})*(,\d+)?$/.test(cleaned)) {
@@ -130,16 +146,14 @@ export function parseEuropeanNumber(raw: string): number {
  * Format a number as European string (comma decimal, dot thousands).
  * Returns the original raw string if parsing fails, to avoid data loss.
  *
- * Uses a custom formatter to avoid relying on `Intl`/locale data that may
- * not be available in all environments (e.g. Node.js test runners).
+ * @param {string} raw
+ * @returns {string}
  */
-export function toEuropeanString(raw: string): string {
+export function toEuropeanString(raw) {
   const n = parseEuropeanNumber(raw);
   if (isNaN(n)) return raw;
-  // toFixed gives us "1234.56"; we then apply European separators.
   const fixed = n.toFixed(2);
   const [intPart, decPart] = fixed.split('.');
-  // Insert dot as thousands separator every 3 digits from the right.
   const intFormatted = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
   return `${intFormatted},${decPart}`;
 }
@@ -147,21 +161,23 @@ export function toEuropeanString(raw: string): string {
 // ─── NIF / CIF / NIE extraction ───────────────────────────────────────────────
 
 /** Regex for Spanish tax identifiers (NIF, CIF, NIE). */
-const NIF_RE =
-  /\b([A-Z]\d{7}[A-Z0-9]|\d{8}[A-Z]|[XYZ]\d{7}[A-Z])\b/g;
+const NIF_RE = /\b([A-Z]\d{7}[A-Z0-9]|\d{8}[A-Z]|[XYZ]\d{7}[A-Z])\b/g;
 
-export interface NifMatch {
-  nif: string;
-  /** Characters immediately before the NIF in the source text */
-  prefix: string;
-  /** Characters immediately after the NIF in the source text */
-  suffix: string;
-}
+/**
+ * @typedef {Object} NifMatch
+ * @property {string} nif
+ * @property {string} prefix - Characters immediately before the NIF in the source text
+ * @property {string} suffix - Characters immediately after the NIF in the source text
+ */
 
-export function extractNifs(text: string): NifMatch[] {
-  const results: NifMatch[] = [];
+/**
+ * @param {string} text
+ * @returns {NifMatch[]}
+ */
+export function extractNifs(text) {
+  const results = [];
   const re = new RegExp(NIF_RE.source, 'g');
-  let m: RegExpExecArray | null;
+  let m;
   while ((m = re.exec(text)) !== null) {
     const start = Math.max(0, m.index - 120);
     const end = Math.min(text.length, m.index + m[0].length + 120);
@@ -176,10 +192,12 @@ export function extractNifs(text: string): NifMatch[] {
 
 /**
  * Try to extract a company/person name near a NIF.
- * Looks at the text immediately before the NIF for a capitalised name
- * (2–6 consecutive capitalised / title-case words).
+ * Looks at the text immediately before the NIF for a capitalised name.
+ *
+ * @param {string} context
+ * @returns {string}
  */
-export function extractNameNearNif(context: string): string {
+export function extractNameNearNif(context) {
   // Try lines that contain "RAZÓN SOCIAL", "NOMBRE", "DENOMINACIÓN"
   const labelled =
     /(?:RAZ[ÓO]N\s+SOCIAL|NOMBRE|DENOMINACI[ÓO]N|EMISOR|PROVEEDOR|CLIENTE|DESTINATARIO)\s*:?\s*([^\n\r;]{3,60})/i;
@@ -190,7 +208,6 @@ export function extractNameNearNif(context: string): string {
   const lines = context.split(/\n/);
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i].trim();
-    // A line containing mostly capital letters (company name style)
     if (/([A-ZÁÉÍÓÚÑÜ][A-Za-záéíóúñü]+\s+){1,5}[A-ZÁÉÍÓÚÑÜ]/.test(line) && line.length < 80) {
       return line;
     }
@@ -201,22 +218,24 @@ export function extractNameNearNif(context: string): string {
 // ─── IGIC extraction ──────────────────────────────────────────────────────────
 
 /**
+ * @typedef {Object} IgicEntry
+ * @property {string} percent
+ * @property {string} amount
+ * @property {string} base
+ */
+
+/**
  * Extract IGIC tranches from text.
  *
- * Handles patterns like:
- *   "IGIC 7%  14,00"
- *   "Base imponible: 200,00  IGIC (7%): 14,00"
- *   "7% IGIC  14,00"
- *   Multiple lines with different rates
+ * @param {string} text
+ * @returns {IgicEntry[]}
  */
-export function extractIgic(text: string): IgicEntry[] {
-  const entries: IgicEntry[] = [];
+export function extractIgic(text) {
+  const entries = [];
 
   // Pattern A: "IGIC" followed (optionally) by percent, then an amount
-  // e.g. "IGIC 7% 14,00"  or  "IGIC (7 %) 14,00"
-  const reA =
-    /IGIC\s*\(?(\d{1,2}(?:[.,]\d+)?)\s*%\)?\s*:?\s*([\d.,]+)/gi;
-  let m: RegExpExecArray | null;
+  const reA = /IGIC\s*\(?(\d{1,2}(?:[.,]\d+)?)\s*%\)?\s*:?\s*([\d.,]+)/gi;
+  let m;
   while ((m = reA.exec(text)) !== null) {
     const pct = m[1].replace(',', '.');
     const amt = toEuropeanString(m[2]);
@@ -225,12 +244,10 @@ export function extractIgic(text: string): IgicEntry[] {
   }
 
   // Pattern B: percent first, then "IGIC" or "de IGIC"
-  // e.g. "7% IGIC   14,00"
-  const reB =
-    /(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:de\s+)?IGIC\s*:?\s*([\d.,]+)/gi;
+  const reB = /(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:de\s+)?IGIC\s*:?\s*([\d.,]+)/gi;
   while ((m = reB.exec(text)) !== null) {
     const pct = m[1].replace(',', '.');
-    if (entries.some((e) => e.percent === pct)) continue; // dedup
+    if (entries.some((e) => e.percent === pct)) continue;
     const amt = toEuropeanString(m[2]);
     const base = findBaseForPercent(text, pct);
     entries.push({ percent: pct, amount: amt, base });
@@ -248,41 +265,47 @@ export function extractIgic(text: string): IgicEntry[] {
   return entries;
 }
 
-function findBaseForPercent(text: string, _pct: string): string {
-  // Look for "Base imponible ... <amount>" near the same line or in a table
-  const reBase =
-    /BASE\s+(?:IMPONIBLE)?\s*:?\s*([\d.,]+)/gi;
-  const bases: string[] = [];
-  let m: RegExpExecArray | null;
+/**
+ * @param {string} text
+ * @param {string} _pct
+ * @returns {string}
+ */
+function findBaseForPercent(text, _pct) {
+  const reBase = /BASE\s+(?:IMPONIBLE)?\s*:?\s*([\d.,]+)/gi;
+  const bases = [];
+  let m;
   while ((m = reBase.exec(text)) !== null) {
     bases.push(toEuropeanString(m[1]));
   }
-  // If exactly one base found, attribute it to this percent
   if (bases.length === 1) return bases[0];
-  // Otherwise leave blank (caller will pipe-separate all available bases)
   return '';
 }
 
 /**
  * Extract all distinct base amounts from text.
+ *
+ * @param {string} text
+ * @returns {string[]}
  */
-export function extractBases(text: string): string[] {
+export function extractBases(text) {
   const re = /BASE\s+(?:IMPONIBLE)?\s*:?\s*([\d.,]+)/gi;
-  const results: string[] = [];
-  let m: RegExpExecArray | null;
+  const results = [];
+  let m;
   while ((m = re.exec(text)) !== null) {
     results.push(toEuropeanString(m[1]));
   }
-  return [...new Set(results)]; // deduplicate
+  return [...new Set(results)];
 }
 
 // ─── Total extraction ─────────────────────────────────────────────────────────
 
 /**
  * Extract the invoice total amount.
- * Tries several label patterns in order of preference.
+ *
+ * @param {string} text
+ * @returns {string}
  */
-export function extractTotal(text: string): string {
+export function extractTotal(text) {
   const patterns = [
     /TOTAL\s+(?:A\s+PAGAR|FACTURA|IMPORTE)\s*:?\s*([\d.,]+)/gi,
     /IMPORTE\s+TOTAL\s*:?\s*([\d.,]+)/gi,
@@ -297,11 +320,12 @@ export function extractTotal(text: string): string {
 
 // ─── Currency detection ───────────────────────────────────────────────────────
 
-export type CurrencyMarker = '' | '[MONEDA: USD]' | '[MONEDA: NON-EUR]';
-
-export function detectCurrencyMarker(text: string): CurrencyMarker {
+/**
+ * @param {string} text
+ * @returns {'' | '[MONEDA: USD]' | '[MONEDA: NON-EUR]'}
+ */
+export function detectCurrencyMarker(text) {
   if (/\bUSD\b|\$\s*[\d.,]/.test(text)) return '[MONEDA: USD]';
-  // Other non-EUR currencies
   if (/\bGBP\b|£\s*[\d.,]|\bCHF\b|\bJPY\b|\bCAD\b|\bAUD\b/.test(text))
     return '[MONEDA: NON-EUR]';
   return '';
@@ -312,21 +336,23 @@ export function detectCurrencyMarker(text: string): CurrencyMarker {
 const CONTRACT_KEYWORDS = /\b(compraventa|contrato)\b/i;
 
 /**
- * Determine whether the invoice is a Compra, Venta, or Otro, and whether it
- * is a contract document.
- *
- * Heuristic:
- *  1. If CONTRACT_KEYWORDS found → Otro + isContract = true.
- *  2. Else if the company's NIF/name appears near "emisor / vendedor / proveedor"
- *     labels → Venta.
- *  3. Else if the company's NIF/name appears near "cliente / destinatario /
- *     comprador / receptor" labels → Compra.
- *  4. Otherwise → Otro.
+ * @typedef {'Compra'|'Venta'|'Otro'} InvoiceType
  */
-export function classifyInvoice(
-  text: string,
-  settings: CompanySettings,
-): { tipo: InvoiceType; isContract: boolean } {
+
+/**
+ * @typedef {Object} CompanySettings
+ * @property {string} name
+ * @property {string} nif
+ */
+
+/**
+ * Determine whether the invoice is a Compra, Venta, or Otro.
+ *
+ * @param {string} text
+ * @param {CompanySettings} settings
+ * @returns {{ tipo: InvoiceType, isContract: boolean }}
+ */
+export function classifyInvoice(text, settings) {
   if (CONTRACT_KEYWORDS.test(text)) {
     return { tipo: 'Otro', isContract: true };
   }
@@ -335,13 +361,12 @@ export function classifyInvoice(
   const companyNif = settings.nif.toUpperCase().trim();
   const companyName = settings.name.toUpperCase().trim();
 
-  const hasCompanyId = (ctx: string): boolean => {
+  const hasCompanyId = (ctx) => {
     if (companyNif && ctx.includes(companyNif)) return true;
     if (companyName && ctx.includes(companyName)) return true;
     return false;
   };
 
-  // Look for "emisor" / "vendedor" sections
   const issuerSection = extractSection(upper, [
     'EMISOR', 'VENDEDOR', 'PROVEEDOR', 'EXPEDIDA POR', 'FACTURADO POR',
   ]);
@@ -349,7 +374,6 @@ export function classifyInvoice(
     return { tipo: 'Venta', isContract: false };
   }
 
-  // Look for "cliente" / "destinatario" sections
   const recipientSection = extractSection(upper, [
     'CLIENTE', 'DESTINATARIO', 'COMPRADOR', 'RECEPTOR', 'FACTURADO A',
   ]);
@@ -357,9 +381,7 @@ export function classifyInvoice(
     return { tipo: 'Compra', isContract: false };
   }
 
-  // Fallback: if company id appears at all without section context
   if (companyNif && upper.includes(companyNif)) {
-    // Check relative position: company in first half → likely issuer (Venta)
     const pos = upper.indexOf(companyNif);
     if (pos < upper.length / 2) return { tipo: 'Venta', isContract: false };
     return { tipo: 'Compra', isContract: false };
@@ -368,26 +390,25 @@ export function classifyInvoice(
   return { tipo: 'Otro', isContract: false };
 }
 
-/** All recognised section-label keywords (used to find section boundaries). */
+/** All recognised section-label keywords. */
 const ALL_SECTION_LABELS = [
   'EMISOR', 'VENDEDOR', 'PROVEEDOR', 'EXPEDIDA POR', 'FACTURADO POR',
   'CLIENTE', 'DESTINATARIO', 'COMPRADOR', 'RECEPTOR', 'FACTURADO A',
 ];
 
 /**
- * Extract up to 300 chars after each of the given label words, but stop at
- * the first occurrence of any other section label so we don't spill context
- * into the next block.
+ * @param {string} text
+ * @param {string[]} labels
+ * @returns {string}
  */
-function extractSection(text: string, labels: string[]): string {
+function extractSection(text, labels) {
   for (const label of labels) {
     const idx = text.indexOf(label);
     if (idx === -1) continue;
     const afterLabel = text.slice(idx + label.length);
-    // Find the earliest boundary imposed by a sibling label
     let end = Math.min(afterLabel.length, 300);
     for (const other of ALL_SECTION_LABELS) {
-      if (labels.includes(other)) continue; // same group – not a boundary
+      if (labels.includes(other)) continue;
       const otherIdx = afterLabel.indexOf(other);
       if (otherIdx !== -1 && otherIdx < end) end = otherIdx;
     }
@@ -398,38 +419,33 @@ function extractSection(text: string, labels: string[]): string {
 
 // ─── Contraparte extraction ───────────────────────────────────────────────────
 
-export interface ContraparteInfo {
-  name: string;
-  nif: string;
-  needsReview: boolean;
-}
+/**
+ * @typedef {Object} ContraparteInfo
+ * @property {string} name
+ * @property {string} nif
+ * @property {boolean} needsReview
+ */
 
 /**
  * Extract the counterparty (the other party – not the company).
  *
- * If tipo === 'Venta': counterparty is the client/recipient.
- * If tipo === 'Compra': counterparty is the supplier/issuer.
- * If tipo === 'Otro':   use best-guess (first prominent NIF found that ≠ company NIF).
+ * @param {string} text
+ * @param {CompanySettings} settings
+ * @param {InvoiceType} tipo
+ * @returns {ContraparteInfo}
  */
-export function extractContraparte(
-  text: string,
-  settings: CompanySettings,
-  tipo: InvoiceType,
-): ContraparteInfo {
+export function extractContraparte(text, settings, tipo) {
   const nifs = extractNifs(text);
   const companyNifUpper = settings.nif.toUpperCase().trim();
 
-  // Filter out the company's own NIF
   const otherNifs = nifs.filter((n) => n.nif.toUpperCase() !== companyNifUpper);
 
   if (otherNifs.length === 0) {
     return { name: '', nif: '', needsReview: true };
   }
 
-  // Pick the most relevant NIF based on tipo
-  let chosen: NifMatch;
+  let chosen;
   if (tipo === 'Venta') {
-    // Counterparty is the recipient – look in "cliente" / "destinatario" sections
     const recipientSection = extractSection(text.toUpperCase(), [
       'CLIENTE', 'DESTINATARIO', 'COMPRADOR', 'RECEPTOR',
     ]);
@@ -453,22 +469,39 @@ export function extractContraparte(
   return {
     name,
     nif: chosen.nif,
-    needsReview: !name, // flag if we could not extract a name
+    needsReview: !name,
   };
 }
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 
 /**
- * Parse a raw text string (from PDF extraction or OCR) into a structured
- * `ParsedInvoice` object.
+ * @typedef {Object} ParsedInvoice
+ * @property {string} filename
+ * @property {string} fecha
+ * @property {InvoiceType} tipo
+ * @property {string} contraparte
+ * @property {string} total
+ * @property {string} igicPercent
+ * @property {string} igicAmount
+ * @property {string} base
+ * @property {string} rawText
+ * @property {boolean} needsReview
+ * @property {string[]} reviewReasons
+ * @property {boolean} isContract
  */
-export function parseInvoice(
-  rawText: string,
-  filename: string,
-  settings: CompanySettings,
-): ParsedInvoice {
-  const reviewReasons: string[] = [];
+
+/**
+ * Parse a raw text string (from PDF extraction or OCR) into a structured
+ * ParsedInvoice object.
+ *
+ * @param {string} rawText
+ * @param {string} filename
+ * @param {CompanySettings} settings
+ * @returns {ParsedInvoice}
+ */
+export function parseInvoice(rawText, filename, settings) {
+  const reviewReasons = [];
 
   // ── Date ──────────────────────────────────────────────────────────────────
   const dates = extractDates(rawText);
@@ -517,12 +550,10 @@ export function parseInvoice(
     igicAmount = igicEntries.map((e) => e.amount).filter(Boolean).join('|');
     base = igicEntries.map((e) => e.base).filter(Boolean).join('|');
 
-    // If bases are missing from igic entries, try standalone extraction
     if (!base) {
       base = extractBases(rawText).join('|');
     }
   } else {
-    // Even without IGIC, try to extract base imponible
     base = extractBases(rawText).join('|');
   }
 

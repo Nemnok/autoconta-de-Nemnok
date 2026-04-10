@@ -1,52 +1,67 @@
 /**
- * main.ts — SPA entry point
+ * main.js — SPA entry point
  *
  * Orchestrates the full processing pipeline:
  *   file upload → PDF/image text extraction → OCR → invoice parsing → display → CSV export
+ *
+ * PDF policy: 1 page = 1 invoice row (filename shown as "file.pdf#p1", "#p2", …)
  */
 
-import { extractPdfText } from './pdfTextExtract.js';
-import { ocrImage, ocrCanvases } from './ocr.js';
+import { extractPdfPages } from './pdfTextExtract.js';
+import { ocrImage } from './ocr.js';
 import { parseInvoice } from './parseInvoice.js';
 import { invoicesToCsv, downloadCsv } from './formatCsv.js';
-import type { CompanySettings, InvoiceRow, ParsedInvoice } from './types.js';
-import './styles.css';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
-let settings: CompanySettings = loadSettings();
-const rows: InvoiceRow[] = [];
+/** @type {{ name: string, nif: string }} */
+let settings = loadSettings();
+
+/**
+ * @typedef {'pending'|'processing'|'done'|'error'} ProcessingStatus
+ *
+ * @typedef {Object} InvoiceRow
+ * @property {string} id
+ * @property {string} filename
+ * @property {ProcessingStatus} status
+ * @property {string} [error]
+ * @property {import('./parseInvoice.js').ParsedInvoice} [parsed]
+ * @property {boolean} showRaw
+ */
+
+/** @type {InvoiceRow[]} */
+const rows = [];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function loadSettings(): CompanySettings {
+function loadSettings() {
   try {
     const raw = localStorage.getItem('autoconta_settings');
-    if (raw) return JSON.parse(raw) as CompanySettings;
+    if (raw) return JSON.parse(raw);
   } catch { /* ignore */ }
   return { name: '', nif: '' };
 }
 
-function saveSettings(s: CompanySettings): void {
+function saveSettings(s) {
   localStorage.setItem('autoconta_settings', JSON.stringify(s));
 }
 
-function uid(): string {
+function uid() {
   return Math.random().toString(36).slice(2);
 }
 
 // ─── DOM refs ────────────────────────────────────────────────────────────────
 
-const fileInput = document.getElementById('file-input') as HTMLInputElement;
-const dropZone = document.getElementById('drop-zone') as HTMLDivElement;
-const tableBody = document.getElementById('table-body') as HTMLTableSectionElement;
-const exportBtn = document.getElementById('export-btn') as HTMLButtonElement;
-const settingsBtn = document.getElementById('settings-btn') as HTMLButtonElement;
-const settingsModal = document.getElementById('settings-modal') as HTMLDivElement;
-const settingsClose = document.getElementById('settings-close') as HTMLButtonElement;
-const settingsSave = document.getElementById('settings-save') as HTMLButtonElement;
-const inputName = document.getElementById('input-name') as HTMLInputElement;
-const inputNif = document.getElementById('input-nif') as HTMLInputElement;
+const fileInput = document.getElementById('file-input');
+const dropZone = document.getElementById('drop-zone');
+const tableBody = document.getElementById('table-body');
+const exportBtn = document.getElementById('export-btn');
+const settingsBtn = document.getElementById('settings-btn');
+const settingsModal = document.getElementById('settings-modal');
+const settingsClose = document.getElementById('settings-close');
+const settingsSave = document.getElementById('settings-save');
+const inputName = document.getElementById('input-name');
+const inputNif = document.getElementById('input-nif');
 
 // Pre-fill settings inputs
 inputName.value = settings.name;
@@ -88,50 +103,129 @@ fileInput.addEventListener('change', () => {
   fileInput.value = '';
 });
 
-async function handleFiles(files: FileList): Promise<void> {
+/**
+ * @param {FileList} files
+ */
+async function handleFiles(files) {
   for (const file of Array.from(files)) {
-    const row: InvoiceRow = {
-      id: uid(),
-      filename: file.name,
-      status: 'pending',
-      showRaw: false,
-    };
-    rows.push(row);
-    renderRow(row);
-    // Start async processing (don't await here to allow UI updates)
-    processFile(file, row).catch((err: unknown) => {
-      row.status = 'error';
-      row.error = err instanceof Error ? err.message : String(err);
-      updateRow(row);
-    });
+    if (file.type === 'application/pdf') {
+      // Create a placeholder row immediately while we load the PDF
+      const placeholderRow = {
+        id: uid(),
+        filename: file.name,
+        status: 'processing',
+        showRaw: false,
+      };
+      rows.push(placeholderRow);
+      renderRow(placeholderRow);
+
+      // Process PDF per page asynchronously
+      processPdf(file, placeholderRow).catch((err) => {
+        placeholderRow.status = 'error';
+        placeholderRow.error = err instanceof Error ? err.message : String(err);
+        updateRow(placeholderRow);
+      });
+    } else if (file.type.startsWith('image/')) {
+      const row = {
+        id: uid(),
+        filename: file.name,
+        status: 'pending',
+        showRaw: false,
+      };
+      rows.push(row);
+      renderRow(row);
+      processImage(file, row).catch((err) => {
+        row.status = 'error';
+        row.error = err instanceof Error ? err.message : String(err);
+        updateRow(row);
+      });
+    } else {
+      const row = {
+        id: uid(),
+        filename: file.name,
+        status: 'error',
+        error: `Tipo de archivo no soportado: ${file.type}`,
+        showRaw: false,
+      };
+      rows.push(row);
+      renderRow(row);
+    }
   }
   updateExportButton();
 }
 
 // ─── Processing pipeline ──────────────────────────────────────────────────────
 
-async function processFile(file: File, row: InvoiceRow): Promise<void> {
+/**
+ * Process a PDF file: one row per page.
+ * The placeholder row becomes the first page's row; additional pages get new rows.
+ *
+ * @param {File} file
+ * @param {InvoiceRow} placeholderRow - pre-existing row to reuse for page 1
+ */
+async function processPdf(file, placeholderRow) {
+  const buffer = await file.arrayBuffer();
+  const pages = await extractPdfPages(buffer);
+
+  if (pages.length === 0) {
+    placeholderRow.status = 'error';
+    placeholderRow.error = 'No se encontraron páginas en el PDF';
+    updateRow(placeholderRow);
+    return;
+  }
+
+  for (let idx = 0; idx < pages.length; idx++) {
+    const page = pages[idx];
+    const pageLabel = pages.length === 1
+      ? file.name
+      : `${file.name}#p${page.pageNum}`;
+
+    // Reuse the placeholder row for the first page; create new rows for the rest
+    let row;
+    if (idx === 0) {
+      row = placeholderRow;
+      row.filename = pageLabel;
+    } else {
+      row = { id: uid(), filename: pageLabel, status: 'processing', showRaw: false };
+      rows.push(row);
+      renderRow(row);
+    }
+
+    row.status = 'processing';
+    updateRow(row);
+
+    try {
+      let rawText;
+      if (page.needsOcr && page.canvas) {
+        rawText = await ocrImage(page.canvas);
+      } else {
+        rawText = page.text;
+      }
+
+      row.parsed = parseInvoice(rawText, pageLabel, settings);
+      row.status = 'done';
+    } catch (err) {
+      row.status = 'error';
+      row.error = err instanceof Error ? err.message : String(err);
+    }
+
+    updateRow(row);
+    updateExportButton();
+  }
+}
+
+/**
+ * Process a single image file.
+ *
+ * @param {File} file
+ * @param {InvoiceRow} row
+ */
+async function processImage(file, row) {
   row.status = 'processing';
   updateRow(row);
 
-  let rawText = '';
-
-  if (file.type === 'application/pdf') {
-    const buffer = await file.arrayBuffer();
-    const result = await extractPdfText(buffer);
-    if (result.needsOcr) {
-      rawText = await ocrCanvases(result.canvases);
-    } else {
-      rawText = result.text;
-    }
-  } else if (file.type.startsWith('image/')) {
-    rawText = await ocrImage(file);
-  } else {
-    throw new Error(`Tipo de archivo no soportado: ${file.type}`);
-  }
-
-  const parsed: ParsedInvoice = parseInvoice(rawText, file.name, settings);
-  row.parsed = parsed;
+  const rawText = await ocrImage(file);
+  row.parsed = parseInvoice(rawText, file.name, settings);
   row.status = 'done';
   updateRow(row);
   updateExportButton();
@@ -139,14 +233,24 @@ async function processFile(file: File, row: InvoiceRow): Promise<void> {
 
 // ─── Table rendering ──────────────────────────────────────────────────────────
 
-function renderRow(row: InvoiceRow): void {
+/**
+ * @param {InvoiceRow} row
+ */
+function renderRow(row) {
+  // Remove the empty-state placeholder row on first insert
+  const emptyRow = document.getElementById('empty-row');
+  if (emptyRow) emptyRow.remove();
+
   const tr = document.createElement('tr');
   tr.id = `row-${row.id}`;
   tableBody.appendChild(tr);
   updateRow(row);
 }
 
-function updateRow(row: InvoiceRow): void {
+/**
+ * @param {InvoiceRow} row
+ */
+function updateRow(row) {
   const tr = document.getElementById(`row-${row.id}`);
   if (!tr) return;
 
@@ -194,7 +298,7 @@ function updateRow(row: InvoiceRow): void {
 }
 
 tableBody.addEventListener('click', (e) => {
-  const btn = (e.target as HTMLElement).closest('[data-action]') as HTMLElement | null;
+  const btn = e.target.closest('[data-action]');
   if (!btn) return;
   const action = btn.dataset['action'];
   const id = btn.dataset['id'];
@@ -210,20 +314,24 @@ tableBody.addEventListener('click', (e) => {
 // ─── Export ───────────────────────────────────────────────────────────────────
 
 exportBtn.addEventListener('click', () => {
-  const done = rows.filter((r) => r.status === 'done' && r.parsed).map((r) => r.parsed!);
+  const done = rows.filter((r) => r.status === 'done' && r.parsed).map((r) => r.parsed);
   if (done.length === 0) return;
   const csv = invoicesToCsv(done);
   downloadCsv(csv, 'facturas.csv');
 });
 
-function updateExportButton(): void {
+function updateExportButton() {
   const hasDone = rows.some((r) => r.status === 'done' && r.parsed);
   exportBtn.disabled = !hasDone;
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
-function escapeHtml(s: string): string {
+/**
+ * @param {string} s
+ * @returns {string}
+ */
+function escapeHtml(s) {
   return s
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -231,11 +339,19 @@ function escapeHtml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function truncate(s: string, max: number): string {
+/**
+ * @param {string} s
+ * @param {number} max
+ * @returns {string}
+ */
+function truncate(s, max) {
   return s.length > max ? s.slice(0, max) + '…' : s;
 }
 
-function showToast(message: string): void {
+/**
+ * @param {string} message
+ */
+function showToast(message) {
   const toast = document.createElement('div');
   toast.className = 'toast';
   toast.textContent = message;

@@ -1,5 +1,5 @@
 /**
- * ocr.ts
+ * ocr.js
  *
  * Thin wrapper around Tesseract.js that runs OCR inside a web worker.
  *
@@ -8,11 +8,11 @@
  * avoid repeatedly downloading the language data.
  */
 
-import { createWorker, type Worker } from 'tesseract.js';
+import { createWorker } from 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.esm.min.js';
 
-let _worker: Worker | null = null;
+let _worker = null;
 
-async function getWorker(): Promise<Worker> {
+async function getWorker() {
   if (_worker) return _worker;
   _worker = await createWorker(['spa', 'eng'], 1, {
     // Use CDN-hosted language data so no local file serving is required.
@@ -30,32 +30,22 @@ async function getWorker(): Promise<Worker> {
  * Perform OCR on a canvas element (e.g. a rendered PDF page) or an
  * HTMLImageElement / Blob / URL string.
  *
- * @returns The recognised plain text.
+ * @param {HTMLCanvasElement|HTMLImageElement|Blob|string} source
+ * @returns {Promise<string>} The recognised plain text.
  */
-export async function ocrImage(
-  source: HTMLCanvasElement | HTMLImageElement | Blob | string,
-): Promise<string> {
+export async function ocrImage(source) {
   const worker = await getWorker();
   const { data } = await worker.recognize(source);
   return data.text;
 }
 
 /**
- * OCR multiple canvases (one per PDF page) and concatenate the results.
- */
-export async function ocrCanvases(canvases: HTMLCanvasElement[]): Promise<string> {
-  const parts: string[] = [];
-  for (const canvas of canvases) {
-    parts.push(await ocrImage(canvas));
-  }
-  return parts.join('\n');
-}
-
-/**
  * Release the shared Tesseract worker.  Call this when the app is being
  * destroyed or when you know no more OCR will be performed.
+ *
+ * @returns {Promise<void>}
  */
-export async function terminateOcrWorker(): Promise<void> {
+export async function terminateOcrWorker() {
   if (_worker) {
     await _worker.terminate();
     _worker = null;
