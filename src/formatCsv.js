@@ -1,5 +1,5 @@
 /**
- * formatCsv.ts
+ * formatCsv.js
  *
  * Format extracted invoice data into a semicolon-delimited CSV string.
  *
@@ -20,8 +20,6 @@
  *  - European number formatting (comma decimal) is preserved as-is
  */
 
-import type { ParsedInvoice } from './types.js';
-
 export const CSV_HEADERS = [
   'Fecha',
   'Tipo',
@@ -30,7 +28,7 @@ export const CSV_HEADERS = [
   'IGIC%',
   'IGIC',
   'Base',
-] as const;
+];
 
 /**
  * Escape a single CSV field value.
@@ -39,8 +37,11 @@ export const CSV_HEADERS = [
  *  - If the field contains a semicolon, double-quote, carriage return or
  *    newline, wrap it in double-quotes.
  *  - Escape any embedded double-quotes by doubling them ("").
+ *
+ * @param {string} value
+ * @returns {string}
  */
-export function escapeCsvField(value: string): string {
+export function escapeCsvField(value) {
   const needsQuoting = /[;"\n\r]/.test(value);
   const escaped = value.replace(/"/g, '""');
   return needsQuoting ? `"${escaped}"` : escaped;
@@ -48,9 +49,12 @@ export function escapeCsvField(value: string): string {
 
 /**
  * Serialize a single invoice to a CSV data row (no trailing newline).
+ *
+ * @param {import('./parseInvoice.js').ParsedInvoice} inv
+ * @returns {string}
  */
-export function invoiceToCsvRow(inv: ParsedInvoice): string {
-  const fields: string[] = [
+export function invoiceToCsvRow(inv) {
+  const fields = [
     inv.fecha,
     inv.tipo,
     inv.contraparte,
@@ -65,8 +69,11 @@ export function invoiceToCsvRow(inv: ParsedInvoice): string {
 /**
  * Serialize an array of parsed invoices to a complete CSV string
  * (header + data rows, lines separated by CRLF for maximum compatibility).
+ *
+ * @param {import('./parseInvoice.js').ParsedInvoice[]} invoices
+ * @returns {string}
  */
-export function invoicesToCsv(invoices: ParsedInvoice[]): string {
+export function invoicesToCsv(invoices) {
   const header = CSV_HEADERS.map(escapeCsvField).join(';');
   const rows = invoices.map(invoiceToCsvRow);
   return [header, ...rows].join('\r\n');
@@ -75,10 +82,10 @@ export function invoicesToCsv(invoices: ParsedInvoice[]): string {
 /**
  * Trigger a browser download of the given CSV content.
  *
- * @param content  UTF-8 CSV string
- * @param filename Suggested file name (default: "facturas.csv")
+ * @param {string} content  UTF-8 CSV string
+ * @param {string} [filename]  Suggested file name (default: "facturas.csv")
  */
-export function downloadCsv(content: string, filename = 'facturas.csv'): void {
+export function downloadCsv(content, filename = 'facturas.csv') {
   // BOM (U+FEFF) ensures Excel opens the file with correct encoding
   const bom = '\uFEFF';
   const blob = new Blob([bom + content], { type: 'text/csv;charset=utf-8;' });
