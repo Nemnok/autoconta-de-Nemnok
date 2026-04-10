@@ -9,7 +9,7 @@
 
 import { extractPdfPages } from './pdfTextExtract.js';
 import { ocrImage } from './ocr.js';
-import { parseInvoice } from './parseInvoice.js';
+import { parseInvoice } from './parseInvoiceV2.js';
 import { invoicesToCsv, downloadCsv } from './formatCsv.js';
 
 // ─── State ────────────────────────────────────────────────────────────────────
