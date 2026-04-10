@@ -184,24 +184,23 @@ the same order.
 - Name extraction near NIFs is heuristic and may require manual review.
 - IGIC extraction assumes text follows common Spanish invoice patterns; unusual formats may not be captured.
 - Currency detection is keyword/symbol based; amounts are not converted.
-- The Tesseract language data (~20 MB) is downloaded on first use from a CDN.
+- Tesseract language data (spa + eng) is bundled in the repository under `vendor/tessdata/`.
 
 ## Browser Support
 
 Modern browsers with ES2020+ support: Chrome 90+, Firefox 90+, Edge 90+, Safari 15+.
 
-## Network Access Requirements
+## Vendored Dependencies
 
-The application loads all dependencies at runtime from public CDNs.  Make sure
-the following domains are reachable from the browser:
+All dependencies are vendored inside the repository under `vendor/` — no external CDNs are required.
+The application works fully offline once the GitHub Pages site is loaded.
 
-| CDN | Used for |
-|---|---|
-| `cdn.jsdelivr.net` | Tesseract.js ESM bundle |
-| `cdnjs.cloudflare.com` | Tesseract.js worker & core WASM, PDF.js |
-| `tessdata.projectnaptha.com` | Tesseract language data (spa + eng, ~20 MB, downloaded once) |
-
-> **Smoke-test**: open the browser DevTools → Network tab, reload the page and
-> confirm these domains return HTTP 200.  A blocked CDN will show the affected
-> file(s) in red; OCR will degrade gracefully (an error is shown per file in
-> the table) but the rest of the UI remains functional.
+| Path | Package | Version |
+|---|---|---|
+| `vendor/tesseract/tesseract.esm.min.js` | tesseract.js | 5.1.0 |
+| `vendor/tesseract/worker.min.js` | tesseract.js | 5.1.0 |
+| `vendor/tesseract/tesseract-core-simd-lstm.wasm.js` | tesseract.js-core | 5.1.0 |
+| `vendor/tessdata/eng.traineddata.gz` | @tesseract.js-data/eng | 4.0.0_best_int |
+| `vendor/tessdata/spa.traineddata.gz` | @tesseract.js-data/spa | 4.0.0_best_int |
+| `vendor/pdfjs/pdf.min.mjs` | pdfjs-dist | 4.4.168 |
+| `vendor/pdfjs/pdf.worker.min.mjs` | pdfjs-dist | 4.4.168 |
