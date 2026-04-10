@@ -116,3 +116,19 @@ Multiple IGIC tranches are supported. Percentages, amounts, and bases are stored
 ## Browser Support
 
 Modern browsers with ES2020+ support: Chrome 90+, Firefox 90+, Edge 90+, Safari 15+.
+
+## Network Access Requirements
+
+The application loads all dependencies at runtime from public CDNs.  Make sure
+the following domains are reachable from the browser:
+
+| CDN | Used for |
+|---|---|
+| `cdn.jsdelivr.net` | Tesseract.js ESM bundle |
+| `cdnjs.cloudflare.com` | Tesseract.js worker & core WASM, PDF.js |
+| `tessdata.projectnaptha.com` | Tesseract language data (spa + eng, ~20 MB, downloaded once) |
+
+> **Smoke-test**: open the browser DevTools → Network tab, reload the page and
+> confirm these domains return HTTP 200.  A blocked CDN will show the affected
+> file(s) in red; OCR will degrade gracefully (an error is shown per file in
+> the table) but the rest of the UI remains functional.
