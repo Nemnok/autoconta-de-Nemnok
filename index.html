@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Autoconta</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background-color: #000000;
+      color: #ffffff;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      background-color: #0a1628;
+      border-bottom: 2px solid #1a73e8;
+      padding: 16px 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    header h1 {
+      color: #1a73e8;
+      font-size: 1.8rem;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+
+    nav a {
+      color: #90c2ff;
+      text-decoration: none;
+      margin-left: 24px;
+      font-size: 0.95rem;
+      transition: color 0.2s;
+    }
+
+    nav a:hover {
+      color: #1a73e8;
+    }
+
+    main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 64px 32px;
+      text-align: center;
+    }
+
+    .hero h2 {
+      font-size: 2.8rem;
+      color: #1a73e8;
+      margin-bottom: 16px;
+    }
+
+    .hero p {
+      font-size: 1.1rem;
+      color: #90c2ff;
+      max-width: 600px;
+      line-height: 1.7;
+      margin-bottom: 40px;
+    }
+
+    .btn {
+      display: inline-block;
+      background-color: #1a73e8;
+      color: #ffffff;
+      padding: 14px 36px;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 1rem;
+      font-weight: 600;
+      letter-spacing: 1px;
+      transition: background-color 0.2s;
+    }
+
+    .btn:hover {
+      background-color: #1558b0;
+    }
+
+    .features {
+      display: flex;
+      gap: 24px;
+      margin-top: 64px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .card {
+      background-color: #0a1628;
+      border: 1px solid #1a73e8;
+      border-radius: 8px;
+      padding: 32px 24px;
+      width: 220px;
+      text-align: center;
+    }
+
+    .card h3 {
+      color: #1a73e8;
+      margin-bottom: 12px;
+      font-size: 1.1rem;
+    }
+
+    .card p {
+      color: #90c2ff;
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+
+    footer {
+      background-color: #0a1628;
+      border-top: 2px solid #1a73e8;
+      padding: 16px 32px;
+      text-align: center;
+      color: #90c2ff;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>Autoconta</h1>
+    <nav>
+      <a href="#home" aria-label="Home">Home</a>
+      <a href="#about" aria-label="About">About</a>
+      <a href="#contact" aria-label="Contact">Contact</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="hero">
+      <h2>Welcome to Autoconta</h2>
+      <p>A modern platform built for future development. Clean, fast, and ready to grow.</p>
+      <a href="#get-started" class="btn" aria-label="Get Started with Autoconta">Get Started</a>
+    </div>
+
+    <div class="features">
+      <div class="card">
+        <h3>Fast</h3>
+        <p>Optimized for performance from the ground up.</p>
+      </div>
+      <div class="card">
+        <h3>Secure</h3>
+        <p>Built with security as a core principle.</p>
+      </div>
+      <div class="card">
+        <h3>Scalable</h3>
+        <p>Ready to expand as your needs grow.</p>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <p>&copy; 2026 Autoconta. All rights reserved.</p>
+  </footer>
+
+</body>
+</html>
