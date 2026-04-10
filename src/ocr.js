@@ -7,18 +7,16 @@
  * The Tesseract worker is created once and reused for the session to
  * avoid repeatedly downloading the language data.
  *
- * The Tesseract ESM bundle on jsDelivr uses a default export rather than
- * named exports, so we load it via a dynamic import and extract createWorker
- * from the result.  This also means a CDN failure causes a graceful runtime
- * error instead of crashing module initialisation (and taking the whole UI
- * with it).
+ * All Tesseract assets (ESM bundle, worker, core WASM, language data) are
+ * vendored inside the repository under vendor/ so the app works on GitHub
+ * Pages with zero external CDN dependencies.
  */
 
 let _worker = null;
 
 /** @returns {Promise<Function>} The createWorker function from Tesseract.js */
 async function loadCreateWorker() {
-  const mod = await import('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.esm.min.js');
+  const mod = await import(new URL('../vendor/tesseract/tesseract.esm.min.js', import.meta.url).href);
   // The ESM bundle exposes a default export object; fall back to named export
   // in case a future version switches to proper named exports.
   const createWorker = mod.default?.createWorker ?? mod.createWorker;
@@ -31,13 +29,12 @@ async function loadCreateWorker() {
 async function getWorker() {
   if (_worker) return _worker;
   const createWorker = await loadCreateWorker();
+  const base = new URL('../vendor/tesseract/', import.meta.url).href;
+  const tessdata = new URL('../vendor/tessdata/', import.meta.url).href;
   _worker = await createWorker(['spa', 'eng'], 1, {
-    // Use CDN-hosted language data so no local file serving is required.
-    langPath: 'https://tessdata.projectnaptha.com/4.0.0',
-    workerPath:
-      'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.0/worker.min.js',
-    corePath:
-      'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js-core/5.1.0/tesseract-core-simd-lstm.wasm.js',
+    langPath: tessdata,
+    workerPath: new URL('worker.min.js', base).href,
+    corePath: new URL('tesseract-core-simd-lstm.wasm.js', base).href,
     logger: () => { /* suppress progress logs in production */ },
   });
   return _worker;

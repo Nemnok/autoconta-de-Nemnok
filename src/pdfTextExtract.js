@@ -8,13 +8,15 @@
  *
  * Policy: 1 PDF page = 1 invoice row.
  * Each call to extractPdfPages returns an array with one entry per page.
+ *
+ * PDF.js is vendored inside the repository under vendor/pdfjs/ so the app
+ * works on GitHub Pages with zero external CDN dependencies.
  */
 
-import * as pdfjs from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs';
+import * as pdfjs from '../vendor/pdfjs/pdf.min.mjs';
 
-// Configure the PDF.js worker via CDN.
-pdfjs.GlobalWorkerOptions.workerSrc =
-  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
+// Configure the PDF.js worker using the vendored local copy.
+pdfjs.GlobalWorkerOptions.workerSrc = new URL('../vendor/pdfjs/pdf.worker.min.mjs', import.meta.url).href;
 
 /** Minimum characters per page to consider embedded text "good". */
 const MIN_CHARS_PER_PAGE = 50;
