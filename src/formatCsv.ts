@@ -41,7 +41,7 @@ export const CSV_HEADERS = [
  *  - Escape any embedded double-quotes by doubling them ("").
  */
 export function escapeCsvField(value: string): string {
-  const needsQuoting = /[;"'\n\r]/.test(value);
+  const needsQuoting = /[;"\n\r]/.test(value);
   const escaped = value.replace(/"/g, '""');
   return needsQuoting ? `"${escaped}"` : escaped;
 }
