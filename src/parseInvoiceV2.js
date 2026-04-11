@@ -280,7 +280,7 @@ function extractCompanyName(text, nifMatch, clientNif, clientName) {
   const allNames = findCompanyNamesInText(text);
   const validNames = allNames.filter(cn => !isClientRelated(cn.name) && !isGarbageName(cn.name));
 
-  if (validNames.length > 0) {
+  if (validNames.length > 0 && nifMatch) {
     // Prefer names closest to the chosen NIF
     let best = validNames[0];
     let bestDist = Math.abs(best.index - nifMatch.index);
@@ -302,6 +302,23 @@ function extractCompanyName(text, nifMatch, clientNif, clientName) {
       }
     }
     
+    return normalizeCompanyName(best.name);
+  }
+
+  // Strategy 1b: No NIF match but we found valid company names — use the first non-client name
+  if (validNames.length > 0 && !nifMatch) {
+    let best = validNames[0];
+    // Prefer uppercase variant
+    const stripForCompare = (s) => s.toUpperCase().replace(/[^A-ZÁÉÍÓÚÑÜW\s]/g, '').replace(/\s+/g, ' ').trim();
+    const bestNorm = stripForCompare(best.name);
+    for (const cn of validNames) {
+      if (cn === best) continue;
+      const cnNorm = stripForCompare(cn.name);
+      if (cnNorm === bestNorm && cn.name === cn.name.toUpperCase()) {
+        best = cn;
+        break;
+      }
+    }
     return normalizeCompanyName(best.name);
   }
 
@@ -373,6 +390,22 @@ export function extractContraparteV2(text, settings, tipo) {
   const otherNifs = nifs.filter((n) => !nifsMatch(n.nif, companyNif));
 
   if (otherNifs.length === 0) {
+    // No other NIF found in text — try to extract company name from S.L./S.A. patterns anyway
+    const name = extractCompanyName(text, null, settings.nif, settings.name);
+    // Also try to find a NIF in the GDPR/responsable block
+    let gdprNif = '';
+    const gdprNifRe = /(?:responsable|CIF|C\.I\.F\.)[\s\S]{0,200}?\b([A-Z]\d{7}[A-Z0-9])\b/gi;
+    let gm;
+    while ((gm = gdprNifRe.exec(text)) !== null) {
+      const resolved = resolveNif(gm[1]);
+      if (resolved && !nifsMatch(resolved, companyNif)) {
+        gdprNif = resolved;
+        break;
+      }
+    }
+    if (name || gdprNif) {
+      return { name, nif: gdprNif, needsReview: !name };
+    }
     return { name: '', nif: '', needsReview: true };
   }
 
@@ -563,16 +596,26 @@ function extractChafirasTranches(text) {
 /**
  * Extract IGIC from Placahome-style multiline table.
  * "Importe neto\n\nBase IGIC\n\n%IGIC\n\nCuota IGIC\n\n24,01\n\n24,01\n\n7,00\n\n1,68"
+ * Also handles OCR variant: "Base IGIC %IGIC | Cuota IGIC |\n24,01\n\n24,01 | 700 1,68 |"
  */
 function extractPlacahomeTranches(text) {
+  // Try strict multiline header first
   const headerRe = /(?:Base\s+IGIC|Importe\s+neto)\s*\n+\s*(?:Base\s+IGIC\s*\n+\s*)?%\s*IGIC\s*\n+\s*Cuota\s+IGIC/i;
-  const headerMatch = headerRe.exec(text);
+  let headerMatch = headerRe.exec(text);
+  
+  // Try single-line header variant (OCR joins columns): "Base IGIC %IGIC | Cuota IGIC |"
+  if (!headerMatch) {
+    const headerRe2 = /Base\s+IGIC\s+%\s*IGIC\s*\|?\s*Cuota\s+IGIC/i;
+    headerMatch = headerRe2.exec(text);
+  }
+  
   if (!headerMatch) return [];
 
   const entries = [];
   const afterHeader = text.slice(headerMatch.index + headerMatch[0].length);
 
-  const numRe = /\b(\d{1,3}(?:\.\d{3})*,\d{2})\b/g;
+  // Collect numbers — both standard comma-decimal and plain integers (OCR garble)
+  const numRe = /\b(\d{1,3}(?:\.\d{3})*,\d{2}|\d{3})\b/g;
   const numbers = [];
   let m;
   while ((m = numRe.exec(afterHeader)) !== null) {
@@ -581,12 +624,17 @@ function extractPlacahomeTranches(text) {
   }
 
   // Numbers come in groups of 4: importeNeto, baseIgic, %igic, cuota
-  // Or groups of 2 if header is "%IGIC Cuota IGIC" (just rate + cuota, base=importeNeto)
   // For Placahome: 24,01 24,01 7,00 1,68 → base=24,01, rate=7, amount=1,68
+  // OCR variant: 24,01 24,01 700 1,68 → 700 = 7,00 (missing comma)
   for (let i = 0; i + 3 < numbers.length; i += 4) {
     const importeNeto = toEuropeanString(numbers[i]);
     const base = toEuropeanString(numbers[i + 1]);
-    const rateVal = parseEuropeanNumber(numbers[i + 2]);
+    let rateRaw = numbers[i + 2];
+    // Handle OCR garble: "700" → "7,00", "300" → "3,00"
+    if (/^\d{3}$/.test(rateRaw)) {
+      rateRaw = rateRaw.slice(0, -2) + ',' + rateRaw.slice(-2);
+    }
+    const rateVal = parseEuropeanNumber(rateRaw);
     const pct = String(rateVal);
     const amount = toEuropeanString(numbers[i + 3]);
     if (KNOWN_IGIC_RATES.has(pct)) {
@@ -806,13 +854,16 @@ export function extractIgicV2(text) {
   }
 
   // Pattern: multiline "7,00 %\n\n1.G.1.C.\n\n45,06" (Chafiras single-tranche)
+  // Also handles same-line: "7,00%  1.G.1.C. 45.06"
   {
-    const re = /(\d{1,2}(?:,\d+)?)\s*%\s*\n+\s*(?:1\.G\.1\.C\.?|I\.G\.I\.C\.?)\s*\n+\s*(\d{1,3}(?:\.\d{3})*,\d{2})/gi;
+    const re = /(\d{1,2}(?:,\d+)?)\s*%\s*(?:\n+\s*)?(?:1\.G\.1\.C\.?|I\.G\.I\.C\.?)\s*(?:\n+\s*)?(\d{1,3}(?:\.\d{3})*[.,]\d{2})/gi;
     let m;
     while ((m = re.exec(text)) !== null) {
       const pct = String(parseFloat(m[1].replace(',', '.')));
       if (!KNOWN_IGIC_RATES.has(pct)) continue;
-      const amt = toEuropeanString(m[2]);
+      // Amount may use . or , as decimal: "45.06" or "45,06"
+      const amtStr = m[2].replace(/\.(\d{2})$/, ',$1');
+      const amt = toEuropeanString(amtStr);
       if (!entries.some((e) => e.percent === pct))
         entries.push({ percent: pct, amount: amt, base: '' });
     }
@@ -891,11 +942,14 @@ function assignBasesToEntries(text, entries) {
   }
   
   // Also try: BASE IMPONIBLE followed by text, then a number on a later line
+  // Also handles OCR splits like "BASE IMPONI BLE"
   if (bases.length === 0) {
-    const re2 = /BASE\s+IMPONIBLE[\s\S]{0,100}?(\d{1,3}(?:\.\d{3})*,\d{2})/gi;
+    const re2 = /BASE\s+IMPON\w*\s*\w*[\s\S]{0,100}?(\d{1,3}(?:\.\d{3})*[.,]\d{2})/gi;
     while ((m = re2.exec(text)) !== null) {
-      const val = toEuropeanString(m[1]);
-      const num = parseEuropeanNumber(m[1]);
+      // Normalize decimal: "643.69" → "643,69"
+      const rawVal = m[1].replace(/\.(\d{2})$/, ',$1');
+      const val = toEuropeanString(rawVal);
+      const num = parseEuropeanNumber(rawVal);
       if (isNaN(num) || num < 0.01) continue;
       bases.push({ value: val, index: m.index });
     }
@@ -937,8 +991,8 @@ function assignBasesToEntries(text, entries) {
   while ((m = reNeto.exec(text)) !== null)
     bases.push({ value: toEuropeanString(m[1]), index: m.index });
 
-  // "Total Al amount" (Ferretería Goyo)
-  const reTotalAl = /Total\s+Al\s*\n+\s*([\d.,]+)/gi;
+  // "Total Al amount" (Ferretería Goyo) — same line or newlines
+  const reTotalAl = /Total\s+Al\s*(?:\n+\s*)?([\d.,]+)/gi;
   while ((m = reTotalAl.exec(text)) !== null)
     bases.push({ value: toEuropeanString(m[1]), index: m.index });
 
