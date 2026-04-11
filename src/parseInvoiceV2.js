@@ -191,7 +191,8 @@ function findCompanyNamesInText(text) {
     // Filter garbage patterns
     if (/CANTIDAD|IMPORTE|DESCRIPCI|ARTÍCULO|PRECIO|DOCUMENTO|FACTURA/i.test(name)) continue;
     if (/^(?:calle|c\/|www|http|pol\.|email|Tel|IBAN|@)/i.test(name)) continue;
-    if (/comercial@|\.com\b|\.es\b/i.test(name)) continue;
+    // Remove email/URL prefixes but keep the company name after them
+    name = name.replace(/^[a-z.@]+\.(?:com|es|net|org)\s+/i, '');
     if (/Cobrado|VISA|Efectivo/i.test(name)) continue;
     if (/IGIC|IMPONIBLE/i.test(name + suffix)) continue;
     
@@ -227,6 +228,34 @@ function normalizeCompanyName(name) {
   n = n.replace(/([A-Za-záéíóúñüÁÉÍÓÚÑÜ])\s+(S\.(?:L|A)\.)/g, '$1, $2');
   n = n.replace(/,\s*(S\.(?:L|A)\.)/g, ', $1');
   n = n.replace(/\s{2,}/g, ' ');
+  
+  // OCR umlaut corrections
+  n = n.replace(/\bWURTH\b/g, 'WÜRTH');
+  n = n.replace(/\bWurth\b/g, 'Würth');
+  
+  // Uppercase trade name in parentheses
+  n = n.replace(/\(([^)]{2,})\)/g, (match, inside) => {
+    return '(' + inside.toUpperCase() + ')';
+  });
+  
+  // Uppercase the main company name (before suffix) if it looks like a commercial entity
+  // Split at ", S.L." or ", S.A." boundary
+  const suffixMatch = n.match(/(.*?)(,\s*S\.(?:L|A)\..*)/);
+  if (suffixMatch) {
+    const mainName = suffixMatch[1];
+    const rest = suffixMatch[2];
+    // Only uppercase if the name doesn't look like a personal name
+    // Personal names are typically 2 short words (First Last)
+    // Commercial names tend to be longer or have distinctive words
+    const words = mainName.split(/\s+/).filter(w => w.length > 0);
+    const isLikelyPersonalName = words.length <= 2 && 
+      words.every(w => /^[A-ZÁÉÍÓÚÑÜ][a-záéíóúñü]+$/.test(w) && w.length <= 10);
+    
+    if (!isLikelyPersonalName) {
+      n = mainName.toUpperCase() + rest;
+    }
+  }
+  
   return n.trim();
 }
 
@@ -265,6 +294,20 @@ function extractCompanyName(text, nifMatch, clientNif, clientName) {
       const dist = Math.abs(cn.index - nifMatch.index);
       if (dist < bestDist) { best = cn; bestDist = dist; }
     }
+    
+    // Check if there's an all-uppercase variant of the same company name
+    // (e.g., "Ferretería Goyo e Hijos, S.L." → prefer "FERRETERIA GOYO E HIJOS, S.L.")
+    const stripForCompare = (s) => s.toUpperCase().replace(/[^A-ZÁÉÍÓÚÑÜW\s]/g, '').replace(/\s+/g, ' ').trim();
+    const bestNorm = stripForCompare(best.name);
+    for (const cn of validNames) {
+      if (cn === best) continue;
+      const cnNorm = stripForCompare(cn.name);
+      if (cnNorm === bestNorm && cn.name === cn.name.toUpperCase()) {
+        best = cn; // Use the uppercase variant
+        break;
+      }
+    }
+    
     return normalizeCompanyName(best.name);
   }
 
@@ -614,18 +657,18 @@ function extractAtomicaTranches(text) {
   if (!headerMatch) return [];
 
   const entries = [];
-  const afterHeader = text.slice(headerMatch.index + headerMatch[0].length);
+  const afterHeader = text.slice(headerMatch.index + headerMatch[0].length, headerMatch.index + headerMatch[0].length + 500);
 
-  // Collect amounts (numbers followed by €)
-  const numRe = /(\d{1,3}(?:\.\d{3})*,\d{2})\s*€?/g;
-  const numbers = [];
+  // Collect amounts followed by € (not %)
+  const numEuroRe = /(\d{1,3}(?:\.\d{3})*,\d{2})\s*€/g;
+  const euroNumbers = [];
   let m;
-  while ((m = numRe.exec(afterHeader)) !== null) {
-    numbers.push(m[1]);
-    if (numbers.length >= 8) break;
+  while ((m = numEuroRe.exec(afterHeader)) !== null) {
+    euroNumbers.push(m[1]);
+    if (euroNumbers.length >= 8) break;
   }
 
-  // Also collect percent values
+  // Collect percent values
   const pctRe = /(\d{1,2}(?:,\d+)?)\s*%/g;
   const pcts = [];
   while ((m = pctRe.exec(afterHeader)) !== null) {
@@ -633,12 +676,12 @@ function extractAtomicaTranches(text) {
     if (pcts.length >= 4) break;
   }
 
-  // Pattern: base € rate % igicAmount € total €
-  // 112,00 €  7,00 %  7,84 €  119,84 €
-  if (numbers.length >= 3 && pcts.length >= 1) {
-    const base = toEuropeanString(numbers[0]);
+  // Pattern: base €  rate %  igicAmount €  total €
+  // Numbers: [112,00€, 7,84€, 119,84€] and pcts: [7,00]
+  if (euroNumbers.length >= 2 && pcts.length >= 1) {
+    const base = toEuropeanString(euroNumbers[0]);
     const pct = String(parseFloat(pcts[0].replace(',', '.')));
-    const igicAmt = toEuropeanString(numbers[1]);
+    const igicAmt = toEuropeanString(euroNumbers[1]);
     if (KNOWN_IGIC_RATES.has(pct)) {
       entries.push({ percent: pct, amount: igicAmt, base });
     }
@@ -845,15 +888,59 @@ export function extractIgicV2(text) {
 }
 
 function assignBasesToEntries(text, entries) {
-  const re = /BASE(?:\s+IMPONIBLE)?\s*:?\s*([\d.,]+)/gi;
+  // Match BASE IMPONIBLE followed by amount (may have intervening text)
+  const re = /BASE(?:\s+IMPONIBLE)?\s*:?\s*\n*\s*([\d.,]+)/gi;
   const bases = [];
   let m;
-  while ((m = re.exec(text)) !== null)
-    bases.push({ value: toEuropeanString(m[1]), index: m.index });
+  while ((m = re.exec(text)) !== null) {
+    const val = toEuropeanString(m[1]);
+    const num = parseEuropeanNumber(m[1]);
+    if (isNaN(num) || num < 0.01) continue;
+    bases.push({ value: val, index: m.index });
+  }
+  
+  // Also try: BASE IMPONIBLE followed by text, then a number on a later line
+  if (bases.length === 0) {
+    const re2 = /BASE\s+IMPONIBLE[\s\S]{0,100}?(\d{1,3}(?:\.\d{3})*,\d{2})/gi;
+    while ((m = re2.exec(text)) !== null) {
+      const val = toEuropeanString(m[1]);
+      const num = parseEuropeanNumber(m[1]);
+      if (isNaN(num) || num < 0.01) continue;
+      bases.push({ value: val, index: m.index });
+    }
+  }
 
-  const reValor = /Valor\s+neto\s+EUR[\s\S]{0,100}?([\d]{1,3}(?:\.\d{3})*,\d{2})/gi;
-  while ((m = reValor.exec(text)) !== null)
-    bases.push({ value: toEuropeanString(m[1]), index: m.index });
+  // "Valor neto EUR" pattern (Würth) - gets the numbers from the summary block
+  // Format: "Valor neto EUR\n...\n0,00\n2.073,43\n7,00 %\n145,14\n2.218,57"
+  // The base is NOT the first number (that's exenta 0,00), it's the one before the %
+  const reValor = /Valor\s+neto\s+EUR/gi;
+  while ((m = reValor.exec(text)) !== null) {
+    // Get the block of numbers after "Valor neto EUR"
+    const afterValor = text.slice(m.index + m[0].length, m.index + m[0].length + 200);
+    const numRe2 = /(\d{1,3}(?:\.\d{3})*,\d{2})/g;
+    const nums = [];
+    let nm;
+    while ((nm = numRe2.exec(afterValor)) !== null) {
+      nums.push(nm[1]);
+    }
+    // Find the number just before the "X,XX %" pattern
+    const pctIdx = afterValor.search(/\d{1,2},\d+\s*%/);
+    if (pctIdx >= 0) {
+      // The base is the last number before the percent
+      for (let i = nums.length - 1; i >= 0; i--) {
+        const numIdx = afterValor.indexOf(nums[i]);
+        if (numIdx < pctIdx) {
+          bases.push({ value: toEuropeanString(nums[i]), index: m.index });
+          break;
+        }
+      }
+    } else if (nums.length > 0) {
+      // Fallback: take the largest number
+      const largest = nums.reduce((best, n) => 
+        parseEuropeanNumber(n) > parseEuropeanNumber(best) ? n : best, nums[0]);
+      bases.push({ value: toEuropeanString(largest), index: m.index });
+    }
+  }
 
   const reNeto = /Importe\s+neto\s+([\d]{1,3}(?:\.\d{3})*,\d{2})/gi;
   while ((m = reNeto.exec(text)) !== null)
