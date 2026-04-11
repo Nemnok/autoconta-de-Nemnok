@@ -2,19 +2,6 @@
  * parseInvoiceV2.js — Parser v2.0
  *
  * Optimised for Compra invoices with scanned-PDF (OCR) text.
- *
- * Key improvements over v1:
- *  - Default tipo = Compra (unless contrato/compraventa detected in header)
- *  - Robust NIF/CIF/NIE extraction including OCR garble patterns
- *  - OCR normalisation (O/0, I/1, S/5, B/8, A/4) applied to NIF candidates
- *  - Better contraparte: multi-strategy company name extraction
- *  - Currency detection disabled (all invoices are EUR)
- *  - Context-aware date selection (prefers "Fecha" labelled dates)
- *  - Richer TOTAL keywords + numeric fallback
- *  - Improved multi-tranche IGIC extraction including 0%-rate rows
- *
- * Exports the same `parseInvoice` function signature as v1 so main.js needs
- * only an import path change.
  */
 
 export {
@@ -46,15 +33,15 @@ function ocrNifVariants(raw) {
   if (first === '1') variants.push('I' + restDigits);
   if (first === '5') variants.push('S' + restDigits);
   if (first === '4') variants.push('A' + restDigits);
+  if (first === '2') variants.push('Z' + restDigits);
   const digitNorm = upper.replace(/O/g, '0').replace(/[IL]/g, '1').replace(/S/g, '5');
   if (digitNorm !== upper) variants.push(digitNorm);
-  // Handle trailing letter OCR confusion
   if (upper.length === 9) {
     const last = upper[8];
-    const prefix = upper.slice(0, 8);
-    if (last === '4') variants.push(prefix + 'A');
-    if (last === 'A') variants.push(prefix + '4');
-    if (last === '8') variants.push(prefix + 'B');
+    const prefix8 = upper.slice(0, 8);
+    if (last === '4') variants.push(prefix8 + 'A');
+    if (last === 'A') variants.push(prefix8 + '4');
+    if (last === '8') variants.push(prefix8 + 'B');
   }
   return [...new Set(variants)];
 }
@@ -75,14 +62,18 @@ function resolveNif(raw) {
   return null;
 }
 
-/**
- * @typedef {Object} NifMatch
- * @property {string} nif
- * @property {string} rawNif
- * @property {string} prefix
- * @property {string} suffix
- * @property {number} index
- */
+function nifsMatch(nif1, nif2) {
+  if (!nif1 || !nif2) return false;
+  const a = nif1.toUpperCase().trim();
+  const b = nif2.toUpperCase().trim();
+  if (a === b) return true;
+  const resolved1 = resolveNif(a);
+  const resolved2 = resolveNif(b);
+  if (resolved1 && resolved2 && resolved1 === resolved2) return true;
+  if (resolved1 === b || resolved2 === a) return true;
+  if (a.length === b.length && a.length >= 8 && a.slice(1) === b.slice(1)) return true;
+  return false;
+}
 
 export function extractNifsV2(text) {
   const results = [];
@@ -100,24 +91,24 @@ export function extractNifsV2(text) {
     });
   };
 
-  // Pattern 1: standard NIF/CIF/NIE
   const reStd = new RegExp(STD_NIF_RE.source, 'g');
   let m;
   while ((m = reStd.exec(text)) !== null) push(m[0], m.index);
 
-  // Pattern 2: "(NIF B38627774)" or "(NIF 838627774)"
   const reParens = /\(\s*(?:NIF|CIF|NIE|C\.I\.F\.)\s+([A-Z0-9]{7,10})\s*\)/gi;
   while ((m = reParens.exec(text)) !== null)
     push(m[1], m.index + m[0].indexOf(m[1]));
 
-  // Pattern 3: labeled "NIF: B38627774", "CIF: B-76080308", "NIF. 838627774", "C.1.F.:B-76769108"
   const reLabeled = /(?:NIF|CIF|NIE|C\.I\.F\.|C\.1\.F\.?|N\.I\.F\.?)\s*[.:]\s*([A-Z0-9][A-Z0-9\-]{6,11})\b/gi;
   while ((m = reLabeled.exec(text)) !== null)
     push(m[1], m.index + m[0].indexOf(m[1]));
 
-  // Pattern 4: bare NIF after label on next line
-  const reBare = /(?:NIF|CIF|C\.I\.F\.?|C\.1\.F\.?)\s*\.?\s*:?\s*\n?\s*([A-Z0-9\-]{8,12})\b/gi;
-  while ((m = reBare.exec(text)) !== null)
+  const reCifNif = /(?:CIF\/NIF|NIF\/CIF)\s+([A-Z0-9][A-Z0-9\-]{6,11})\b/gi;
+  while ((m = reCifNif.exec(text)) !== null)
+    push(m[1], m.index + m[0].indexOf(m[1]));
+
+  const reCifDni = /(?:CIF\/DNI|DNI\/CIF)\s*:?\s*\n?\s*([A-Z0-9][A-Z0-9\-]{6,11})\b/gi;
+  while ((m = reCifDni.exec(text)) !== null)
     push(m[1], m.index + m[0].indexOf(m[1]));
 
   return results.sort((a, b) => a.index - b.index);
@@ -127,67 +118,147 @@ export function extractNifsV2(text) {
 
 const KNOWN_IGIC_RATES = new Set(['0', '3', '7', '9.5', '9,5', '13', '15', '20']);
 
-const COMPANY_SUFFIX_RE =
-  /(?:,\s*)?(?:S\.L\.U?\.?|S\.A\.U?\.?|S\.C\.P\.?|S\.C\.?|S\.L\.L?\.?|S\.A\.T\.?|S\.COOP\.?|SL\b|SA\b)/i;
-
 function findCompanyNamesInText(text) {
   const results = [];
-  const re = /([A-ZÁÉÍÓÚÑÜa-záéíóúñü][A-ZÁÉÍÓÚÑÜa-záéíóúñü\s,.()&\-]{2,80}?(?:,\s*)?(?:S\.L\.U?\.?|S\.A\.U?\.?|S\.L\b|S\.A\b|SL\b|SA\b)\.?(?:\s*\([^)]{2,40}\))?)/gi;
+  
+  // Normalize: join single newlines (preserving paragraph breaks)
+  const normalized = text.replace(/\n(?!\n)/g, ' ').replace(/\s{2,}/g, ' ');
+  
+  // Find company names with GREEDY match to capture full names  
+  const re = /\b([A-ZÁÉÍÓÚÑÜW][A-ZÁÉÍÓÚÑÜa-záéíóúñü\s,.&\-'()]{2,80})(?:,\s*)?(S\.L\.?U?\.?|S\.A\.?U?\.?|\bSL\b\.?|\bSA\b\.?)(?:\s*\(([^)]{2,40})\))?/gi;
   let m;
-  while ((m = re.exec(text)) !== null) {
-    const name = m[1].trim();
-    if (name.length < 5) continue;
-    if (/^\d/.test(name)) continue;
-    results.push({ name, index: m.index });
+  while ((m = re.exec(normalized)) !== null) {
+    let name = m[1].trim();
+    const suffix = m[2];
+    const tradeName = m[3] || '';
+    
+    // Clean: remove everything before last sentence-ending break
+    let breakIdx = Math.max(
+      name.lastIndexOf('. '),
+      name.lastIndexOf(': '),
+      name.lastIndexOf('; '),
+    );
+    // Also check for comma + capitalized word (e.g., "vigente, Ferretería")
+    // But only if the comma is followed by a capitalized word
+    const commaBreakRe = /,\s+(?=[A-ZÁÉÍÓÚÑÜW][a-záéíóúñü])/g;
+    let cm;
+    while ((cm = commaBreakRe.exec(name)) !== null) {
+      // Only use comma breaks that are clearly sentence boundaries
+      // (preceded by a lowercase word, not part of a company name like "Goyo e Hijos,")
+      const before = name.slice(0, cm.index);
+      if (/[a-záéíóúñü]$/.test(before) && !/, $/.test(before)) {
+        breakIdx = Math.max(breakIdx, cm.index + cm[0].length - 1);
+      }
+    }
+    if (breakIdx >= 0) {
+      const afterBreak = name.slice(breakIdx).replace(/^[.,;:\s]+/, '').trim();
+      if (afterBreak.length >= 3 && /^[A-ZÁÉÍÓÚÑÜW]/.test(afterBreak)) {
+        name = afterBreak;
+      }
+    }
+    
+    // Remove leading prepositions/articles ONLY if they don't look like part of a company name
+    // "LAS CHAFIRAS" → keep "LAS" because it's part of the name
+    // "de Ferretería" → remove "de"
+    name = name.replace(/^(?:a|es|de|del|en|con|y|que|para|por|su|se)\s+/gi, '');
+    // Only remove articles if followed by a lowercase word (not part of a company name)
+    // Don't use /i flag here - we want case-sensitive check
+    if (/^(?:la|el|los|las)\s+[a-záéíóúñü]/i.test(name)) {
+      // Check if followed by lowercase (truly not a company name)
+      const afterArticle = name.replace(/^(?:la|el|los|las)\s+/i, '');
+      if (/^[a-záéíóúñü]/.test(afterArticle)) {
+        name = afterArticle;
+      }
+    }
+    
+    // Remove leading lowercase words
+    name = name.replace(/^(?:[a-záéíóúñü]+\s+)+(?=[A-ZÁÉÍÓÚÑÜW])/, '');
+    
+    // Remove leading non-alpha garbage
+    name = name.replace(/^[^A-ZÁÉÍÓÚÑÜa-záéíóúñü]+/, '');
+    // Remove leading OCR garbage (short sequences of random uppercase chars + single letters)
+    // e.g., "DSS A LAS CHAFIRAS" → "LAS CHAFIRAS"
+    name = name.replace(/^(?:[A-Z]{1,4}\s+)*(?=[A-Z]{3,})/, (match) => {
+      // Only remove if it looks like garbage (not part of a real company name)
+      // A real company name usually has > 4 chars in the first word
+      return match;
+    });
+    // More targeted: remove "DSS A " or similar short uppercase + single letter prefixes
+    name = name.replace(/^(?:[A-Z]{1,3}\s+[A-Z]\s+)+(?=[A-Z]{2,})/, '');
+    
+    if (name.length < 3) continue;
+    
+    // Filter garbage patterns
+    if (/CANTIDAD|IMPORTE|DESCRIPCI|ARTÍCULO|PRECIO|DOCUMENTO|FACTURA/i.test(name)) continue;
+    if (/^(?:calle|c\/|www|http|pol\.|email|Tel|IBAN|@)/i.test(name)) continue;
+    if (/comercial@|\.com\b|\.es\b/i.test(name)) continue;
+    if (/Cobrado|VISA|Efectivo/i.test(name)) continue;
+    if (/IGIC|IMPONIBLE/i.test(name + suffix)) continue;
+    
+    // Build full name
+    let fullName = name;
+    if (!fullName.endsWith(',')) {
+      fullName += ', ' + suffix;
+    } else {
+      fullName += ' ' + suffix;
+    }
+    if (tradeName) fullName += ' (' + tradeName + ')';
+    fullName = fullName.replace(/\s{2,}/g, ' ').replace(/,\s*,/g, ',').trim();
+    
+    if (fullName.length < 5) continue;
+    
+    const origIdx = text.indexOf(name.slice(0, Math.min(15, name.length)));
+    results.push({ name: fullName, index: origIdx >= 0 ? origIdx : m.index });
   }
+  
   return results;
 }
 
 function normalizeCompanyName(name) {
   let n = name.trim();
-  // Clean up extra periods before comma+suffix
+  n = n.replace(/\s*\n\s*/g, ' ');
   n = n.replace(/\.+(,\s*S\.)/g, '$1');
-  // Fix bare SL/SA → S.L./S.A.
   n = n.replace(/\bSL\b(?!\.)/g, 'S.L.');
   n = n.replace(/\bSA\b(?!\.)/g, 'S.A.');
-  // Ensure period after S.L or S.A if missing
   n = n.replace(/\bS\.L(?![\.\w])/g, 'S.L.');
   n = n.replace(/\bS\.A(?![\.\w])/g, 'S.A.');
-  // Ensure comma before S.L./S.A. if not already present
+  n = n.replace(/\bs\.A\./g, 'S.A.');
+  n = n.replace(/\bs\.L\./g, 'S.L.');
   n = n.replace(/([A-Za-záéíóúñüÁÉÍÓÚÑÜ])\s+(S\.(?:L|A)\.)/g, '$1, $2');
-  // Fix spacing around comma-suffix
   n = n.replace(/,\s*(S\.(?:L|A)\.)/g, ', $1');
-  // Clean up multiple spaces
   n = n.replace(/\s{2,}/g, ' ');
   return n.trim();
 }
 
+/**
+ * Check if a company name looks like garbage from OCR noise.
+ */
+function isGarbageName(name) {
+  const upper = name.toUpperCase();
+  // Table headers or column headers
+  if (/\bCANTIDAD\b|\bIMPORTE\b|\bDESCRIPCI|ARTÍCULO|\bPRECIO\b|\bDOCUMENTO\b/i.test(upper)) return true;
+  // Very short after cleanup
+  if (name.replace(/[^a-záéíóúñüA-ZÁÉÍÓÚÑÜ]/g, '').length < 5) return true;
+  return false;
+}
+
 function extractCompanyName(text, nifMatch, clientNif, clientName) {
   const clientNifUpper = (clientNif || '').toUpperCase().trim();
-  const clientNameUpper = (clientName || '').toUpperCase().trim();
 
   const isClientRelated = (name) => {
     const upper = name.toUpperCase();
     if (clientNifUpper && upper.includes(clientNifUpper)) return true;
-    if (clientNameUpper && clientNameUpper.length >= 4 && upper.includes(clientNameUpper)) return true;
     if (/\bBRATUKH\b/i.test(name)) return true;
     if (/\bMAKSYM\b/i.test(name)) return true;
     return false;
   };
 
-  // Strategy 1: Look near the NIF (400-char context)
-  const context = nifMatch.prefix + '\n' + nifMatch.suffix;
-  const nearbyNames = findCompanyNamesInText(context);
-  for (const cn of nearbyNames) {
-    if (!isClientRelated(cn.name)) {
-      return normalizeCompanyName(cn.name);
-    }
-  }
-
-  // Strategy 2: Search the ENTIRE text
+  // Strategy 1: Look for company names in the ENTIRE text, pick the one closest to our NIF
   const allNames = findCompanyNamesInText(text);
-  const validNames = allNames.filter(cn => !isClientRelated(cn.name));
+  const validNames = allNames.filter(cn => !isClientRelated(cn.name) && !isGarbageName(cn.name));
+
   if (validNames.length > 0) {
+    // Prefer names closest to the chosen NIF
     let best = validNames[0];
     let bestDist = Math.abs(best.index - nifMatch.index);
     for (const cn of validNames) {
@@ -197,39 +268,27 @@ function extractCompanyName(text, nifMatch, clientNif, clientName) {
     return normalizeCompanyName(best.name);
   }
 
-  // Strategy 3: GDPR responsable pattern
+  // Strategy 2: GDPR "responsable" pattern with optional trade name
   const gdprMatch =
-    /(?:responsable\s+(?:es|del\s+tratamiento[^:]*es)\s*:?\s*([^,\n]{5,60}(?:,\s*)?(?:S\.L\.?|S\.A\.?)\.?(?:\s*\([^)]{2,40}\))?))/i
+    /(?:responsable[^.]{0,120}?)\b([A-ZÁÉÍÓÚÑÜa-záéíóúñü][^,\n]{3,60}(?:,\s*)?(?:S\.L\.?|S\.A\.?)\.?)(?:\s*\(([^)]{2,40})\))?/i
       .exec(text);
   if (gdprMatch && !isClientRelated(gdprMatch[1])) {
-    return normalizeCompanyName(gdprMatch[1].trim());
+    let name = normalizeCompanyName(gdprMatch[1].trim());
+    if (gdprMatch[2]) name += ' (' + gdprMatch[2].trim() + ')';
+    return name;
   }
 
-  // Strategy 4: Fall back to old approach
-  return extractNameNearNifV2(nifMatch.prefix, nifMatch.suffix);
+  return '';
 }
 
 export function extractNameNearNifV2(prefix, suffix) {
   const combined = prefix + ' ' + suffix;
   const labelledRe =
-    /(?:RAZ[ÓO]N\s+SOCIAL|NOMBRE(?:\s+FISCAL)?|DENOMINACI[ÓO]N|RAZ[ÓO]N|EMPRESA|EMISOR|PROVEEDOR|DESTINATARIO|SOCIEDAD)\s*:?\s*([^\n\r;:]{3,80})/i;
+    /(?:RAZ[ÓO]N\s+SOCIAL|NOMBRE(?:\s+FISCAL)?|DENOMINACI[ÓO]N)\s*:?\s*([^\n\r;:]{3,80})/i;
   const lm = labelledRe.exec(combined);
   if (lm) {
     const candidate = lm[1].trim().replace(/\s{2,}/g, ' ');
     if (candidate.length >= 3) return candidate;
-  }
-  const lines = prefix.split(/[\n\r]+/);
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim().replace(/\s{2,}/g, ' ');
-    if (!line || line.length < 3 || line.length > 120) continue;
-    const hasCompanySuffix = COMPANY_SUFFIX_RE.test(line);
-    const hasCapWords = (line.match(/[A-ZÁÉÍÓÚÑÜ]{2,}/g) ?? []).length >= 2;
-    if (hasCompanySuffix || hasCapWords) {
-      if (/^\d{2}[\/\-]\d{2}[\/\-]\d{4}/.test(line)) continue;
-      if (/^\+?[\d\s\-()]{7,}$/.test(line)) continue;
-      if (/^(calle|c\/|avda|av\.|plaza|pg\.)/i.test(line)) continue;
-      return line;
-    }
   }
   return '';
 }
@@ -260,45 +319,11 @@ function extractSection(text, labels) {
 }
 
 export function classifyInvoiceV2(text, settings) {
-  // Only check for contract keywords in the first quarter (header area)
   const headerEnd = Math.floor(text.length / 4);
   const headerText = text.slice(0, headerEnd);
   if (CONTRACT_KEYWORDS.test(headerText)) {
     return { tipo: 'Otro', isContract: true };
   }
-
-  const upper = text.toUpperCase();
-  const companyNif = settings.nif.toUpperCase().trim();
-  const companyName = settings.name.toUpperCase().trim();
-
-  if (!companyNif && !companyName) {
-    return { tipo: 'Compra', isContract: false };
-  }
-
-  const hasCompanyId = (ctx) => {
-    if (companyNif && ctx.includes(companyNif)) return true;
-    if (companyName && companyName.length >= 4 && ctx.includes(companyName)) return true;
-    return false;
-  };
-
-  const issuerSection = extractSection(upper, [
-    'EMISOR', 'VENDEDOR', 'PROVEEDOR', 'EXPEDIDA POR', 'FACTURADO POR',
-  ]);
-  if (issuerSection && hasCompanyId(issuerSection))
-    return { tipo: 'Venta', isContract: false };
-
-  const recipientSection = extractSection(upper, [
-    'CLIENTE', 'DESTINATARIO', 'COMPRADOR', 'RECEPTOR', 'FACTURADO A',
-  ]);
-  if (recipientSection && hasCompanyId(recipientSection))
-    return { tipo: 'Compra', isContract: false };
-
-  if (companyNif && upper.includes(companyNif)) {
-    const pos = upper.indexOf(companyNif);
-    if (pos < upper.length / 2) return { tipo: 'Venta', isContract: false };
-    return { tipo: 'Compra', isContract: false };
-  }
-
   return { tipo: 'Compra', isContract: false };
 }
 
@@ -306,34 +331,44 @@ export function classifyInvoiceV2(text, settings) {
 
 export function extractContraparteV2(text, settings, tipo) {
   const nifs = extractNifsV2(text);
-  const companyNifUpper = settings.nif.toUpperCase().trim();
-  const otherNifs = nifs.filter((n) => n.nif.toUpperCase() !== companyNifUpper);
+  const companyNif = settings.nif || '';
+
+  const otherNifs = nifs.filter((n) => !nifsMatch(n.nif, companyNif));
 
   if (otherNifs.length === 0) {
     return { name: '', nif: '', needsReview: true };
   }
 
-  let chosen = null;
+  // If there are multiple NIFs, prefer one from a formal registration/inscription line
+  let chosen = otherNifs[0];
 
-  if (tipo === 'Venta') {
-    const recipientSection = extractSection(text.toUpperCase(), [
-      'CLIENTE', 'DESTINATARIO', 'COMPRADOR', 'RECEPTOR',
-    ]);
-    const inRecipient = otherNifs.filter((n) =>
-      recipientSection.includes(n.nif.toUpperCase()));
-    chosen = inRecipient[0] ?? otherNifs[0];
-  } else {
-    const issuerSection = extractSection(text.toUpperCase(), [
-      'EMISOR', 'VENDEDOR', 'PROVEEDOR',
-    ]);
-    const inIssuer = otherNifs.filter((n) =>
-      issuerSection.includes(n.nif.toUpperCase()));
-    if (inIssuer.length > 0) {
-      chosen = inIssuer[0];
-    } else {
-      const upperThirdEnd = Math.floor(text.length / 3);
-      const inUpperThird = otherNifs.filter((n) => n.index < upperThirdEnd);
-      chosen = inUpperThird[0] ?? otherNifs[0];
+  // Look for NIF in formal registration text (R.M., Reg. Merc., Inscrita, Inscripción)
+  const regRe = /(?:Insc(?:rit[ao]|ripción)|R\.M\.|Reg\.\s*Merc\.)[^]*?(?:C\.I\.F\.|C\.1\.F\.?|CIF)\s*[.:]\s*([A-Z0-9\-]{8,12})/gi;
+  let regMatch;
+  while ((regMatch = regRe.exec(text)) !== null) {
+    const regNif = resolveNif(regMatch[1]);
+    if (regNif && !nifsMatch(regNif, companyNif)) {
+      const found = otherNifs.find(n => n.nif === regNif);
+      if (found) { chosen = found; break; }
+    }
+  }
+
+  // If not found in registration text, check CIF label lines (excluding our own)
+  if (chosen === otherNifs[0] && otherNifs.length > 1) {
+    const inscriptionRe = /(?:C\.I\.F\.|C\.1\.F\.?|CIF)\s*[.:]\s*([A-Z0-9\-]{8,12})/gi;
+    let insMatch;
+    const lastInsNif = [];
+    while ((insMatch = inscriptionRe.exec(text)) !== null) {
+      const insNif = resolveNif(insMatch[1]);
+      if (insNif && !nifsMatch(insNif, companyNif)) {
+        lastInsNif.push(insNif);
+      }
+    }
+    // Prefer the LAST CIF label (typically in footer/registration area)
+    if (lastInsNif.length > 0) {
+      const lastNif = lastInsNif[lastInsNif.length - 1];
+      const found = otherNifs.find(n => n.nif === lastNif);
+      if (found) chosen = found;
     }
   }
 
@@ -355,83 +390,88 @@ function extractAllAmounts(text) {
 }
 
 export function extractTotalV2(text) {
-  // Ordered by specificity (most specific first)
   const patterns = [
     /NETO\s+A\s+PAGAR\s*:?\s*([\d.,]+)/gi,
     /TOTAL\s+A\s+PAGAR\s*:?\s*([\d.,]+)/gi,
     /TOTAL\s+FACTURA\s*:?\s*([\d.,]+)/gi,
-    /TOTAL\s+IMPORTE\s*:?\s*([\d.,]+)/gi,
-    /L[IÍ]QUIDO\s+A\s+PAGAR\s*:?\s*([\d.,]+)/gi,
-    /IMPORTE\s+A\s+PAGAR\s*:?\s*([\d.,]+)/gi,
-    /A\s+PAGAR\s*:?\s*([\d.,]+)/gi,
   ];
 
   for (const re of patterns) {
     const m = re.exec(text);
     if (m) {
       const n = parseEuropeanNumber(m[1]);
-      if (!isNaN(n) && n < 1_000_000) return toEuropeanString(m[1]);
+      if (!isNaN(n) && n < 1_000_000 && n > 0) return toEuropeanString(m[1]);
     }
   }
 
-  // "Importe total EUR ... amount" (Würth format)
+  // "EFECTIVO\n\nAMOUNT" pattern (Chafiras receipts)
   {
-    const re = /Importe\s+total\s+EUR[\s\S]{0,40}?([\d]{1,3}(?:\.\d{3})*,\d{2})/gi;
+    const re = /EFECTIVO\s*\n+\s*(\d{1,3}(?:\.\d{3})*,\d{2})/gi;
     const m = re.exec(text);
     if (m) {
       const n = parseEuropeanNumber(m[1]);
-      if (!isNaN(n) && n < 1_000_000) return toEuropeanString(m[1]);
+      if (!isNaN(n) && n < 1_000_000 && n > 0) return toEuropeanString(m[1]);
     }
   }
 
-  // "TOTAL (EUR) - amount"
+  // "Importe total EUR" → last number in the block (Würth format)
   {
-    const re = /TOTAL\s*\(?EUR\)?\s*[-:.]?\s*([\d.,]+)/gi;
+    const re = /Importe\s+total\s+EUR/gi;
+    const m = re.exec(text);
+    if (m) {
+      const afterMatch = text.slice(m.index + m[0].length, m.index + m[0].length + 200);
+      const amountRe = /(\d{1,3}(?:\.\d{3})*,\d{2})/g;
+      const amounts = [];
+      let am;
+      while ((am = amountRe.exec(afterMatch)) !== null) amounts.push(am[1]);
+      if (amounts.length > 0) {
+        const totalStr = amounts[amounts.length - 1];
+        const n = parseEuropeanNumber(totalStr);
+        if (!isNaN(n) && n < 1_000_000 && n > 0) return toEuropeanString(totalStr);
+      }
+    }
+  }
+
+  // "TOTAL (EUR) -\n\namount" (Placahome format)
+  {
+    const re = /TOTAL\s*\(\s*EUR\s*\)\s*[-:.]?\s*\n*\s*(\d{1,3}(?:\.\d{3})*,\d{2})/gi;
     const m = re.exec(text);
     if (m) {
       const n = parseEuropeanNumber(m[1]);
-      if (!isNaN(n) && n < 1_000_000) return toEuropeanString(m[1]);
+      if (!isNaN(n) && n < 1_000_000 && n > 0) return toEuropeanString(m[1]);
     }
   }
 
-  // "TOTAL amount €"
+  // "TOTAL\n\namount €" (Fijaciones Canarias)
   {
-    const re = /\bTOTAL\s*:?\s*([\d.,]+)\s*€/gi;
-    const m = re.exec(text);
-    if (m) {
-      const n = parseEuropeanNumber(m[1]);
-      if (!isNaN(n) && n < 1_000_000) return toEuropeanString(m[1]);
+    const re = /\bTo[ií]al\s*\n+\s*[\d.,]+\s*\n+\s*[\d.,]+\s*\n+\s*[\d.,]+\s*\n/gi;
+    // Actually search for the € amount pattern
+    const re2 = /(\d{1,3}(?:\.\d{3})*,\d{2})\s*€/g;
+    let m2;
+    let lastAmount = null;
+    while ((m2 = re2.exec(text)) !== null) {
+      lastAmount = m2[1];
+    }
+    // Only use if not already found
+    if (lastAmount) {
+      const n = parseEuropeanNumber(lastAmount);
+      if (!isNaN(n) && n < 1_000_000 && n > 0) return toEuropeanString(lastAmount);
     }
   }
 
-  // Bare "TOTAL amount"
+  // Bare "TOTAL amount" (but filter out small numbers like "TOTAL 3")
   {
     const re = /\bTOTAL\s+([\d]{1,3}(?:\.\d{3})*,\d{2})\b/gi;
     const m = re.exec(text);
     if (m) {
       const n = parseEuropeanNumber(m[1]);
-      if (!isNaN(n) && n < 1_000_000) return toEuropeanString(m[1]);
+      if (!isNaN(n) && n < 1_000_000 && n > 0) return toEuropeanString(m[1]);
     }
   }
 
-  // Numeric fallback: "amount €" in lower part
+  // Last resort: largest amount in lower part
   const splitPoint = Math.floor(text.length / 3);
   const lowerText = text.slice(splitPoint);
-  {
-    const re = /\b(\d{1,3}(?:\.\d{3})*,\d{2})\s*€/g;
-    const amounts = [];
-    let m;
-    while ((m = re.exec(lowerText)) !== null) {
-      const n = parseEuropeanNumber(m[1]);
-      if (!isNaN(n) && n > 0) amounts.push({ value: n, str: m[1] });
-    }
-    if (amounts.length > 0) {
-      const largest = amounts.reduce((best, a) => a.value > best.value ? a : best, amounts[0]);
-      return toEuropeanString(largest.str);
-    }
-  }
-
-  // Last resort: largest amount in lower part excluding BASE/IGIC lines
   const cleanedLower = lowerText
     .split(/\n/)
     .filter((l) => !/\b(?:BASE|IGIC|CUOTA|TIPO|Valor\s+neto)\b/i.test(l))
@@ -446,6 +486,204 @@ export function extractTotalV2(text) {
 }
 
 // ─── IGIC extraction v2 ───────────────────────────────────────────────────────
+
+/**
+ * Extract IGIC from Chafiras-style multiline table.
+ * Header: "BASE IMPONIBLE % IGIC\n\nIMPORTE"
+ * Data comes as separate numbers on newlines: base1\n\nrate1\n\namount1\n\nbase2\n\nrate2\n\namount2
+ */
+function extractChafirasTranches(text) {
+  const headerRe = /BASE\s+IMPONIBLE\s+%\s*IGIC\s*\n/i;
+  const headerMatch = headerRe.exec(text);
+  if (!headerMatch) return [];
+
+  const entries = [];
+  const afterHeader = text.slice(headerMatch.index + headerMatch[0].length);
+
+  // Collect all numbers from separate lines
+  const numRe = /\b(\d{1,3}(?:\.\d{3})*,\d{2})\b/g;
+  const numbers = [];
+  let m;
+  while ((m = numRe.exec(afterHeader)) !== null) {
+    numbers.push(m[1]);
+    if (numbers.length >= 12) break; // safety
+  }
+
+  // Numbers come in groups of 3: base, rate, amount
+  // BUT if the header says "IMPORTE" separately, there might be stray text
+  // For Chafiras: 11,15 7,00 0,78 9,60 3,00 0,29
+  for (let i = 0; i + 2 < numbers.length; i += 3) {
+    const base = toEuropeanString(numbers[i]);
+    const rateVal = parseEuropeanNumber(numbers[i + 1]);
+    const pct = String(rateVal);
+    const amount = toEuropeanString(numbers[i + 2]);
+    if (KNOWN_IGIC_RATES.has(pct)) {
+      entries.push({ percent: pct, amount, base });
+    } else {
+      break; // Stop when we hit non-rate numbers
+    }
+  }
+  return entries;
+}
+
+/**
+ * Extract IGIC from Placahome-style multiline table.
+ * "Importe neto\n\nBase IGIC\n\n%IGIC\n\nCuota IGIC\n\n24,01\n\n24,01\n\n7,00\n\n1,68"
+ */
+function extractPlacahomeTranches(text) {
+  const headerRe = /(?:Base\s+IGIC|Importe\s+neto)\s*\n+\s*(?:Base\s+IGIC\s*\n+\s*)?%\s*IGIC\s*\n+\s*Cuota\s+IGIC/i;
+  const headerMatch = headerRe.exec(text);
+  if (!headerMatch) return [];
+
+  const entries = [];
+  const afterHeader = text.slice(headerMatch.index + headerMatch[0].length);
+
+  const numRe = /\b(\d{1,3}(?:\.\d{3})*,\d{2})\b/g;
+  const numbers = [];
+  let m;
+  while ((m = numRe.exec(afterHeader)) !== null) {
+    numbers.push(m[1]);
+    if (numbers.length >= 12) break;
+  }
+
+  // Numbers come in groups of 4: importeNeto, baseIgic, %igic, cuota
+  // Or groups of 2 if header is "%IGIC Cuota IGIC" (just rate + cuota, base=importeNeto)
+  // For Placahome: 24,01 24,01 7,00 1,68 → base=24,01, rate=7, amount=1,68
+  for (let i = 0; i + 3 < numbers.length; i += 4) {
+    const importeNeto = toEuropeanString(numbers[i]);
+    const base = toEuropeanString(numbers[i + 1]);
+    const rateVal = parseEuropeanNumber(numbers[i + 2]);
+    const pct = String(rateVal);
+    const amount = toEuropeanString(numbers[i + 3]);
+    if (KNOWN_IGIC_RATES.has(pct)) {
+      entries.push({ percent: pct, amount, base });
+    } else {
+      break;
+    }
+  }
+  return entries;
+}
+
+/**
+ * Extract IGIC from DEEGIE/Radicansa-style:
+ * "IGIC 3,00%\n" on product lines + summary section with "Base Exenta"
+ */
+function extractDeegieIgicTranches(text) {
+  const entries = [];
+
+  // Look for "BASE\n\n317,41 €" followed by amounts
+  // Actually parse: base_exenta, base_3%, IGIC 3,00%, amount, TOTAL
+  // Structure: "0,41  Base Exenta  0,00  317,00  IGIC 3,00%  9,51"
+
+  // Pattern: "amount\n\nBase Exenta" → exenta base
+  const exentaRe = /(\d{1,3}(?:\.\d{3})*,\d{2})\s*(?:\n+\s*)?Base\s+Exenta/i;
+  const exentaMatch = exentaRe.exec(text);
+
+  // Pattern: "amount\n\nIGIC X,XX%\n\namount"
+  // or on same line: "317,00  IGIC 3,00%  9,51"  
+  const igicRe = /(\d{1,3}(?:\.\d{3})*,\d{2})\s*(?:\n+\s*)?IGIC\s+(\d{1,2}(?:,\d+)?)%\s*(?:\n+\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})/gi;
+  let m;
+  while ((m = igicRe.exec(text)) !== null) {
+    const base = toEuropeanString(m[1]);
+    const pct = String(parseFloat(m[2].replace(',', '.')));
+    const amount = toEuropeanString(m[3]);
+    if (!entries.some(e => e.percent === pct))
+      entries.push({ percent: pct, amount, base });
+  }
+
+  // Add exenta tranche if found
+  if (exentaMatch && !entries.some(e => e.percent === '0')) {
+    entries.push({
+      percent: '0',
+      amount: '0,00',
+      base: toEuropeanString(exentaMatch[1]),
+    });
+  }
+
+  return entries;
+}
+
+/**
+ * Extract from Atomica-style: BASE IMPONIBLE header followed by data on separate lines
+ * "BASE IMPONIBLE\n\nIGIC (0/0)\n\nIGIC (€)\n\nTOTAL\n\n...\n\n112,00 €\n\n7,00 %\n\n7,84 €\n\n119,84 €"
+ */
+function extractAtomicaTranches(text) {
+  // Look for "BASE IMPONIBLE" header followed by IGIC columns
+  const headerRe = /BASE\s+IMPONIBLE\s*\n+\s*IGIC\s*\([^)]*\)\s*\n+\s*IGIC\s*\([^)]*\)/i;
+  const headerMatch = headerRe.exec(text);
+  if (!headerMatch) return [];
+
+  const entries = [];
+  const afterHeader = text.slice(headerMatch.index + headerMatch[0].length);
+
+  // Collect amounts (numbers followed by €)
+  const numRe = /(\d{1,3}(?:\.\d{3})*,\d{2})\s*€?/g;
+  const numbers = [];
+  let m;
+  while ((m = numRe.exec(afterHeader)) !== null) {
+    numbers.push(m[1]);
+    if (numbers.length >= 8) break;
+  }
+
+  // Also collect percent values
+  const pctRe = /(\d{1,2}(?:,\d+)?)\s*%/g;
+  const pcts = [];
+  while ((m = pctRe.exec(afterHeader)) !== null) {
+    pcts.push(m[1]);
+    if (pcts.length >= 4) break;
+  }
+
+  // Pattern: base € rate % igicAmount € total €
+  // 112,00 €  7,00 %  7,84 €  119,84 €
+  if (numbers.length >= 3 && pcts.length >= 1) {
+    const base = toEuropeanString(numbers[0]);
+    const pct = String(parseFloat(pcts[0].replace(',', '.')));
+    const igicAmt = toEuropeanString(numbers[1]);
+    if (KNOWN_IGIC_RATES.has(pct)) {
+      entries.push({ percent: pct, amount: igicAmt, base });
+    }
+  }
+
+  return entries;
+}
+
+/**
+ * Extract from Fijaciones Canarias-style:
+ * "Base Bruta % Dto P.P| Base Neta % IGICImp. IGIC % Rec.| Imp. Recargo"
+ * "35,61  35,61  7,00  |  2,49  38,10 €"
+ */
+function extractFijacionesTranches(text) {
+  const headerRe = /Base\s+(?:Bruta|Neta).*%\s*IGIC/i;
+  if (!headerRe.test(text)) return [];
+
+  const entries = [];
+  // Look for the data block after the header
+  const headerMatch = headerRe.exec(text);
+  const afterHeader = text.slice(headerMatch.index + headerMatch[0].length);
+
+  // Collect numbers from multiline data
+  const numRe = /\b(\d{1,3}(?:\.\d{3})*,\d{2})\b/g;
+  const numbers = [];
+  let m;
+  while ((m = numRe.exec(afterHeader)) !== null) {
+    numbers.push(m[1]);
+    if (numbers.length >= 10) break;
+  }
+
+  // Pattern: baseBruta, baseNeta, rate, igicAmount, total
+  // 35,61  35,61  7,00  2,49  38,10
+  if (numbers.length >= 4) {
+    const base = toEuropeanString(numbers[1]); // baseNeta
+    const rateVal = parseEuropeanNumber(numbers[2]);
+    const pct = String(rateVal);
+    const igicAmt = toEuropeanString(numbers[3]);
+    if (KNOWN_IGIC_RATES.has(pct)) {
+      entries.push({ percent: pct, amount: igicAmt, base });
+    }
+  }
+
+  return entries;
+}
 
 function parseIgicTableRow(line) {
   if (!/\b(?:BASE|IGIC|CUOTA|TIPO|EXENTO|1\.G\.1\.C|I\.G\.I\.C)\b|%/i.test(line) &&
@@ -477,33 +715,100 @@ function parseIgicTableRow(line) {
 }
 
 export function extractIgicV2(text) {
-  const entries = [];
+  let entries = [];
+
+  // Try specialized extractors in order
+
+  // Chafiras-style table (multiline)
+  entries = extractChafirasTranches(text);
+  if (entries.length > 0) return entries;
+
+  // Placahome-style table (multiline)
+  entries = extractPlacahomeTranches(text);
+  if (entries.length > 0) return entries;
+
+  // Atomica-style (BASE IMPONIBLE / IGIC headers with data below)
+  entries = extractAtomicaTranches(text);
+  if (entries.length > 0) return entries;
+
+  // DEEGIE/Radicansa style (IGIC X,XX% on product lines)
+  entries = extractDeegieIgicTranches(text);
+  if (entries.length > 0) return entries;
+
+  // Fijaciones Canarias style (Base Bruta/Neta + %IGIC)
+  entries = extractFijacionesTranches(text);
+  if (entries.length > 0) return entries;
+
+  // Ferretería Goyo format: "3,00: IGIC Reducido  0,82"
+  {
+    let m;
+    const re = /(\d{1,2}(?:,\d+)?)\s*:\s*IGIC\s+\w+\s+([\d.,]+)/gi;
+    while ((m = re.exec(text)) !== null) {
+      const pct = String(parseFloat(m[1].replace(',', '.')));
+      const amt = toEuropeanString(m[2]);
+      if (KNOWN_IGIC_RATES.has(pct) && !entries.some((e) => e.percent === pct))
+        entries.push({ percent: pct, amount: amt, base: '' });
+    }
+    if (entries.length > 0) {
+      assignBasesToEntries(text, entries);
+      return entries;
+    }
+  }
 
   // Pattern A: explicit "IGIC X% amount"
-  const reA = /IGIC\s*\(?(\d{1,2}(?:[.,]\d+)?)\s*%\)?\s*:?\s*([\d.,]+)/gi;
-  let m;
-  while ((m = reA.exec(text)) !== null) {
-    const pct = String(parseFloat(m[1].replace(',', '.')));
-    const amt = toEuropeanString(m[2]);
-    if (!entries.some((e) => e.percent === pct))
-      entries.push({ percent: pct, amount: amt, base: '' });
+  {
+    const reA = /IGIC\s*\(?(\d{1,2}(?:[.,]\d+)?)\s*%\)?\s*:?\s*([\d.,]+)/gi;
+    let m;
+    while ((m = reA.exec(text)) !== null) {
+      const pct = String(parseFloat(m[1].replace(',', '.')));
+      const amt = toEuropeanString(m[2]);
+      if (!entries.some((e) => e.percent === pct))
+        entries.push({ percent: pct, amount: amt, base: '' });
+    }
+    if (entries.length > 0) {
+      assignBasesToEntries(text, entries);
+      return entries;
+    }
   }
 
-  // Pattern A2: "X% de IGIC amount"
-  const reA2 = /(\d{1,2}(?:[.,]\d+)?)\s*%\s*(?:de\s+)?IGIC\s*:?\s*([\d.,]+)/gi;
-  while ((m = reA2.exec(text)) !== null) {
-    const pct = String(parseFloat(m[1].replace(',', '.')));
-    if (entries.some((e) => e.percent === pct)) continue;
-    const amt = toEuropeanString(m[2]);
-    entries.push({ percent: pct, amount: amt, base: '' });
+  // Pattern: multiline "7,00 %\n\n1.G.1.C.\n\n45,06" (Chafiras single-tranche)
+  {
+    const re = /(\d{1,2}(?:,\d+)?)\s*%\s*\n+\s*(?:1\.G\.1\.C\.?|I\.G\.I\.C\.?)\s*\n+\s*(\d{1,3}(?:\.\d{3})*,\d{2})/gi;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const pct = String(parseFloat(m[1].replace(',', '.')));
+      if (!KNOWN_IGIC_RATES.has(pct)) continue;
+      const amt = toEuropeanString(m[2]);
+      if (!entries.some((e) => e.percent === pct))
+        entries.push({ percent: pct, amount: amt, base: '' });
+    }
+    if (entries.length > 0) {
+      assignBasesToEntries(text, entries);
+      return entries;
+    }
   }
 
-  if (entries.length > 0) {
-    assignBasesToEntries(text, entries);
-    return entries;
+  // Pattern: Würth "7,00 %  145,14" near 1.G.1.C (same line or multiline)
+  {
+    const re = /(\d{1,2}(?:,\d+)?)\s*%\s+([\d]{1,3}(?:\.\d{3})*,\d{2})/gi;
+    const lowerHalf = text.slice(Math.floor(text.length / 2));
+    if (/1\.G\.1\.C|I\.G\.I\.C|IGIC/i.test(lowerHalf)) {
+      let m;
+      while ((m = re.exec(lowerHalf)) !== null) {
+        const pct = String(parseFloat(m[1].replace(',', '.')));
+        if (!KNOWN_IGIC_RATES.has(pct)) continue;
+        const amt = toEuropeanString(m[2]);
+        if (!entries.some((e) => e.percent === pct))
+          entries.push({ percent: pct, amount: amt, base: '' });
+      }
+      if (entries.length > 0) {
+        assignBasesToEntries(text, entries);
+        return entries;
+      }
+    }
   }
 
-  // Pattern B: table rows with base/rate/amount structure
+  // Pattern B: table rows
   const igicIdx = text.search(/\b(?:IGIC|1\.G\.1\.C|I\.G\.I\.C)\b/i);
   const baseIdx = text.search(/\bBASE\b/i);
   const searchStart = Math.max(0, Math.min(
@@ -525,46 +830,15 @@ export function extractIgicV2(text) {
   }
   if (entries.length > 0) return entries;
 
-  // Pattern C: "X,XX %  1.G.1.C.  YY,YY"
+  // Pattern: "Total IGIC amount"
   {
-    const re = /(\d{1,2}(?:,\d+)?)\s*[:%]\s*(?:°?\s*)?(?:1\.G\.1\.C\.?|I\.G\.I\.C\.?)\s*[.:]?\s*([\d.,]+)/gi;
-    while ((m = re.exec(text)) !== null) {
-      const pct = String(parseFloat(m[1].replace(',', '.')));
-      const amt = toEuropeanString(m[2]);
-      if (!entries.some((e) => e.percent === pct))
-        entries.push({ percent: pct, amount: amt, base: '' });
+    const reTotalIgic = /Total\s+IGIC\s+([\d.,]+)/gi;
+    let m;
+    while ((m = reTotalIgic.exec(text)) !== null) {
+      const amt = toEuropeanString(m[1]);
+      if (!entries.some((e) => e.amount === amt))
+        entries.push({ percent: '', amount: amt, base: '' });
     }
-    if (entries.length > 0) {
-      assignBasesToEntries(text, entries);
-      return entries;
-    }
-  }
-
-  // Pattern D: "X% amount" in lower half near IGIC/1.G.1.C
-  {
-    const re = /(\d{1,2}(?:,\d+)?)\s*%\s+([\d.,]+)/gi;
-    const lowerHalf = text.slice(Math.floor(text.length / 2));
-    if (/1\.G\.1\.C|I\.G\.I\.C|IGIC/i.test(lowerHalf)) {
-      while ((m = re.exec(lowerHalf)) !== null) {
-        const pct = String(parseFloat(m[1].replace(',', '.')));
-        if (!KNOWN_IGIC_RATES.has(pct)) continue;
-        const amt = toEuropeanString(m[2]);
-        if (!entries.some((e) => e.percent === pct))
-          entries.push({ percent: pct, amount: amt, base: '' });
-      }
-      if (entries.length > 0) {
-        assignBasesToEntries(text, entries);
-        return entries;
-      }
-    }
-  }
-
-  // Pattern E: bare "IGIC : amount"
-  const reC = /IGIC\s*:?\s*([\d.,]+)/gi;
-  while ((m = reC.exec(text)) !== null) {
-    const amt = toEuropeanString(m[1]);
-    if (!entries.some((e) => e.amount === amt))
-      entries.push({ percent: '', amount: amt, base: '' });
   }
 
   return entries;
@@ -577,14 +851,17 @@ function assignBasesToEntries(text, entries) {
   while ((m = re.exec(text)) !== null)
     bases.push({ value: toEuropeanString(m[1]), index: m.index });
 
-  // Also "Valor neto EUR" pattern
-  const reValor = /Valor\s+neto\s+EUR[\s\S]{0,40}?([\d]{1,3}(?:\.\d{3})*,\d{2})/gi;
+  const reValor = /Valor\s+neto\s+EUR[\s\S]{0,100}?([\d]{1,3}(?:\.\d{3})*,\d{2})/gi;
   while ((m = reValor.exec(text)) !== null)
     bases.push({ value: toEuropeanString(m[1]), index: m.index });
 
-  // Also "Importe neto" pattern
-  const reNeto = /Importe\s+neto[\s\S]{0,40}?([\d]{1,3}(?:\.\d{3})*,\d{2})/gi;
+  const reNeto = /Importe\s+neto\s+([\d]{1,3}(?:\.\d{3})*,\d{2})/gi;
   while ((m = reNeto.exec(text)) !== null)
+    bases.push({ value: toEuropeanString(m[1]), index: m.index });
+
+  // "Total Al amount" (Ferretería Goyo)
+  const reTotalAl = /Total\s+Al\s*\n+\s*([\d.,]+)/gi;
+  while ((m = reTotalAl.exec(text)) !== null)
     bases.push({ value: toEuropeanString(m[1]), index: m.index });
 
   if (bases.length === 1 && entries.length === 1) {
@@ -595,7 +872,6 @@ function assignBasesToEntries(text, entries) {
     }
   }
 
-  // Compute missing bases from rate and amount
   for (const entry of entries) {
     if (entry.base || !entry.percent || !entry.amount) continue;
     const rate = parseFloat(entry.percent);
@@ -657,7 +933,6 @@ function chooseBestDateV2(text, dates) {
 export function parseInvoice(rawText, filename, settings) {
   const reviewReasons = [];
 
-  // Date (context-aware selection)
   const dates = extractDates(rawText);
   const bestDate = chooseBestDateV2(rawText, dates);
   let fecha = '';
@@ -667,23 +942,18 @@ export function parseInvoice(rawText, filename, settings) {
     reviewReasons.push('No se pudo determinar la fecha');
   }
 
-  // Type & contract
   const { tipo, isContract } = classifyInvoiceV2(rawText, settings);
 
-  // Contraparte
   const contraInfo = extractContraparteV2(rawText, settings, tipo);
   if (contraInfo.needsReview)
     reviewReasons.push('No se pudo identificar la contraparte con certeza');
 
   let contraparteField = [contraInfo.name, contraInfo.nif].filter(Boolean).join(' ');
   if (isContract) contraparteField += ' [CONTRATO]';
-  // Currency detection disabled — all invoices are EUR
 
-  // Total
   const total = extractTotalV2(rawText);
   if (!total) reviewReasons.push('No se pudo extraer el total de la factura');
 
-  // IGIC
   const igicEntries = extractIgicV2(rawText);
   let igicPercent = '';
   let igicAmount = '';
