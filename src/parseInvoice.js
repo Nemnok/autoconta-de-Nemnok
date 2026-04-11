@@ -40,13 +40,14 @@ const MONTH_MAP = {
 export function extractDates(text) {
   const dates = [];
 
-  // DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
-  const reNumeric = /\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{4})\b/g;
+  // DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY  (also DD/MM/YY with 2-digit year)
+  const reNumeric = /\b(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})\b/g;
   let m;
   while ((m = reNumeric.exec(text)) !== null) {
     const d = Number(m[1]);
     const mo = Number(m[2]);
-    const y = Number(m[3]);
+    let y = Number(m[3]);
+    if (y < 100) y = y < 50 ? 2000 + y : 1900 + y;
     if (isValidDate(y, mo, d)) dates.push(new Date(y, mo - 1, d));
   }
 

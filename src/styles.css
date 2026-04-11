@@ -263,3 +263,25 @@ footer {
   padding: 40px;
   color: #607090;
 }
+
+/* ── OCR confidence badges ───────────────────────────────────────────── */
+.ocr-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  margin-left: 4px;
+  cursor: help;
+  vertical-align: middle;
+}
+.ocr-good { background: #0d3322; color: #4ade80; }
+.ocr-fair { background: #2a1b00; color: #fb923c; }
+.ocr-poor { background: #3b0000; color: #f87171; }
+
+.ocr-progress {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  margin-left: 4px;
+  vertical-align: middle;
+}
