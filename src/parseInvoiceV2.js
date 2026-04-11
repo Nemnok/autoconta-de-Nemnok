@@ -28,20 +28,23 @@ function ocrNifVariants(raw) {
   const variants = [upper];
   const first = upper[0];
   const restDigits = upper.slice(1);
+  // Common OCR confusions for the first character (letter ↔ digit)
   if (first === '8') variants.push('B' + restDigits);
   if (first === '0') variants.push('O' + restDigits);
   if (first === '1') variants.push('I' + restDigits);
   if (first === '5') variants.push('S' + restDigits);
   if (first === '4') variants.push('A' + restDigits);
-  if (first === '2') variants.push('Z' + restDigits); // OCR confuses Z with 2 in NIE documents
+  if (first === '2') variants.push('Z' + restDigits); // NIE documents
   const digitNorm = upper.replace(/O/g, '0').replace(/[IL]/g, '1').replace(/S/g, '5');
   if (digitNorm !== upper) variants.push(digitNorm);
   if (upper.length === 9) {
     const last = upper[8];
     const prefix8 = upper.slice(0, 8);
+    // Last-character OCR confusions
     if (last === '4') variants.push(prefix8 + 'A');
     if (last === 'A') variants.push(prefix8 + '4');
     if (last === '8') variants.push(prefix8 + 'B');
+    if (last === 'B') variants.push(prefix8 + '8');
   }
   return [...new Set(variants)];
 }
@@ -112,6 +115,13 @@ export function extractNifsV2(text) {
     push(m[1], m.index + m[0].indexOf(m[1]));
 
   return results.sort((a, b) => a.index - b.index);
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Normalise OCR decimal: "45.06" → "45,06" (dot before exactly 2 final digits → comma) */
+function normalizeDecimal(s) {
+  return s.replace(/\.(\d{2})$/, ',$1');
 }
 
 // ─── Name extraction ──────────────────────────────────────────────────────────
@@ -223,7 +233,7 @@ function normalizeCompanyName(name) {
   n = n.replace(/,\s*(S\.(?:L|A)\.)/g, ', $1');
   n = n.replace(/\s{2,}/g, ' ');
   
-  // OCR umlaut corrections
+  // Vendor-specific OCR corrections (add more as needed)
   n = n.replace(/\bWURTH\b/g, 'WÜRTH');
   n = n.replace(/\bWurth\b/g, 'Würth');
   
@@ -280,6 +290,17 @@ function extractCompanyName(text, nifMatch, clientNif, clientName) {
   const allNames = findCompanyNamesInText(text);
   const validNames = allNames.filter(cn => !isClientRelated(cn.name) && !isGarbageName(cn.name));
 
+  /** Pick the uppercase variant of a name if one exists in validNames */
+  const preferUppercase = (best) => {
+    const strip = (s) => s.toUpperCase().replace(/[^A-ZÁÉÍÓÚÑÜW\s]/g, '').replace(/\s+/g, ' ').trim();
+    const bestNorm = strip(best.name);
+    for (const cn of validNames) {
+      if (cn === best) continue;
+      if (strip(cn.name) === bestNorm && cn.name === cn.name.toUpperCase()) return cn;
+    }
+    return best;
+  };
+
   if (validNames.length > 0 && nifMatch) {
     // Prefer names closest to the chosen NIF
     let best = validNames[0];
@@ -288,37 +309,13 @@ function extractCompanyName(text, nifMatch, clientNif, clientName) {
       const dist = Math.abs(cn.index - nifMatch.index);
       if (dist < bestDist) { best = cn; bestDist = dist; }
     }
-    
-    // Check if there's an all-uppercase variant of the same company name
-    // (e.g., "Ferretería Goyo e Hijos, S.L." → prefer "FERRETERIA GOYO E HIJOS, S.L.")
-    const stripForCompare = (s) => s.toUpperCase().replace(/[^A-ZÁÉÍÓÚÑÜW\s]/g, '').replace(/\s+/g, ' ').trim();
-    const bestNorm = stripForCompare(best.name);
-    for (const cn of validNames) {
-      if (cn === best) continue;
-      const cnNorm = stripForCompare(cn.name);
-      if (cnNorm === bestNorm && cn.name === cn.name.toUpperCase()) {
-        best = cn; // Use the uppercase variant
-        break;
-      }
-    }
-    
+    best = preferUppercase(best);
     return normalizeCompanyName(best.name);
   }
 
   // Strategy 1b: No NIF match but we found valid company names — use the first non-client name
   if (validNames.length > 0 && !nifMatch) {
-    let best = validNames[0];
-    // Prefer uppercase variant
-    const stripForCompare = (s) => s.toUpperCase().replace(/[^A-ZÁÉÍÓÚÑÜW\s]/g, '').replace(/\s+/g, ' ').trim();
-    const bestNorm = stripForCompare(best.name);
-    for (const cn of validNames) {
-      if (cn === best) continue;
-      const cnNorm = stripForCompare(cn.name);
-      if (cnNorm === bestNorm && cn.name === cn.name.toUpperCase()) {
-        best = cn;
-        break;
-      }
-    }
+    const best = preferUppercase(validNames[0]);
     return normalizeCompanyName(best.name);
   }
 
@@ -861,8 +858,7 @@ export function extractIgicV2(text) {
     while ((m = re.exec(text)) !== null) {
       const pct = String(parseFloat(m[1].replace(',', '.')));
       if (!KNOWN_IGIC_RATES.has(pct)) continue;
-      // Amount may use . or , as decimal: "45.06" or "45,06"
-      const amtStr = m[2].replace(/\.(\d{2})$/, ',$1');
+      const amtStr = normalizeDecimal(m[2]);
       const amt = toEuropeanString(amtStr);
       if (!entries.some((e) => e.percent === pct))
         entries.push({ percent: pct, amount: amt, base: '' });
@@ -946,8 +942,7 @@ function assignBasesToEntries(text, entries) {
   if (bases.length === 0) {
     const re2 = /BASE\s+IMPON\w*\s*\w*[\s\S]{0,100}?(\d{1,3}(?:\.\d{3})*[.,]\d{2})/gi;
     while ((m = re2.exec(text)) !== null) {
-      // Normalize decimal: "643.69" → "643,69"
-      const rawVal = m[1].replace(/\.(\d{2})$/, ',$1');
+      const rawVal = normalizeDecimal(m[1]);
       const val = toEuropeanString(rawVal);
       const num = parseEuropeanNumber(rawVal);
       if (isNaN(num) || num < 0.01) continue;
