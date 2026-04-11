@@ -8,7 +8,7 @@
  */
 
 import { extractPdfPages } from './pdfTextExtract.js';
-import { ocrImage } from './ocr.js';
+import { ocrImage, ocrImageWithRetry, DEFAULT_CONFIDENCE_THRESHOLD } from './ocr.js';
 import { parseInvoice } from './parseInvoiceV2.js';
 import { invoicesToCsv, downloadCsv } from './formatCsv.js';
 
@@ -27,6 +27,10 @@ let settings = loadSettings();
  * @property {string} [error]
  * @property {import('./parseInvoice.js').ParsedInvoice} [parsed]
  * @property {boolean} showRaw
+ * @property {number}  [ocrConfidence]   Tesseract mean-text confidence (0-100)
+ * @property {number}  [ocrAttempts]     Number of OCR passes performed
+ * @property {string}  [ocrPipeline]     Name of the preprocessing pipeline used
+ * @property {boolean} [ocrThresholdMet] Whether confidence ≥ threshold
  */
 
 /** @type {InvoiceRow[]} */
@@ -197,7 +201,21 @@ async function processPdf(file, placeholderRow) {
     try {
       let rawText;
       if (page.needsOcr && page.canvas) {
-        rawText = await ocrImage(page.canvas);
+        // Auto-rescan OCR until confidence ≥ 90% (or pipelines exhausted)
+        const ocrResult = await ocrImageWithRetry(page.canvas, {
+          threshold: DEFAULT_CONFIDENCE_THRESHOLD,
+          onProgress: (info) => {
+            row.ocrAttempts = info.attempt;
+            row.ocrConfidence = info.confidence;
+            row.ocrPipeline = info.pipeline;
+            updateRow(row);
+          },
+        });
+        rawText = ocrResult.text;
+        row.ocrConfidence = ocrResult.confidence;
+        row.ocrAttempts = ocrResult.attempts;
+        row.ocrPipeline = ocrResult.pipeline;
+        row.ocrThresholdMet = ocrResult.thresholdMet;
       } else {
         rawText = page.text;
       }
@@ -224,8 +242,22 @@ async function processImage(file, row) {
   row.status = 'processing';
   updateRow(row);
 
-  const rawText = await ocrImage(file);
-  row.parsed = parseInvoice(rawText, file.name, settings);
+  // Auto-rescan OCR until confidence ≥ 90% (or pipelines exhausted)
+  const ocrResult = await ocrImageWithRetry(file, {
+    threshold: DEFAULT_CONFIDENCE_THRESHOLD,
+    onProgress: (info) => {
+      row.ocrAttempts = info.attempt;
+      row.ocrConfidence = info.confidence;
+      row.ocrPipeline = info.pipeline;
+      updateRow(row);
+    },
+  });
+  row.ocrConfidence = ocrResult.confidence;
+  row.ocrAttempts = ocrResult.attempts;
+  row.ocrPipeline = ocrResult.pipeline;
+  row.ocrThresholdMet = ocrResult.thresholdMet;
+
+  row.parsed = parseInvoice(ocrResult.text, file.name, settings);
   row.status = 'done';
   updateRow(row);
   updateExportButton();
@@ -255,18 +287,36 @@ function updateRow(row) {
   if (!tr) return;
 
   const p = row.parsed;
-  const statusIcon = {
-    pending: '⏳',
-    processing: '<span class="spinner"></span>',
-    done: row.parsed?.needsReview ? '⚠️' : '✅',
-    error: '❌',
-  }[row.status];
+
+  // ── Status icon with OCR confidence badge ────────────────────────────────
+  let statusIcon;
+  if (row.status === 'processing') {
+    const confLabel = row.ocrConfidence != null
+      ? ` OCR ${Math.round(row.ocrConfidence)}% (${row.ocrAttempts ?? 1}/${6})`
+      : '';
+    statusIcon = `<span class="spinner"></span><span class="ocr-progress">${escapeHtml(confLabel)}</span>`;
+  } else if (row.status === 'done') {
+    statusIcon = row.parsed?.needsReview ? '⚠️' : '✅';
+  } else if (row.status === 'error') {
+    statusIcon = '❌';
+  } else {
+    statusIcon = '⏳';
+  }
+
+  // ── OCR quality badge (shown after processing is done) ───────────────────
+  let ocrBadge = '';
+  if (row.status === 'done' && row.ocrConfidence != null) {
+    const pct = Math.round(row.ocrConfidence);
+    const cls = pct >= 90 ? 'ocr-good' : pct >= 70 ? 'ocr-fair' : 'ocr-poor';
+    const tip = `Confianza OCR: ${pct}% · ${row.ocrAttempts ?? 1} intento(s) · ${row.ocrPipeline ?? 'original'}`;
+    ocrBadge = `<span class="ocr-badge ${cls}" title="${escapeHtml(tip)}">${pct}%</span>`;
+  }
 
   const reviewTip = p?.reviewReasons.join('\n') ?? '';
 
   tr.innerHTML = `
     <td>${escapeHtml(row.filename)}</td>
-    <td>${statusIcon}</td>
+    <td>${statusIcon} ${ocrBadge}</td>
     <td>${escapeHtml(p?.fecha ?? '')}</td>
     <td><span class="badge badge-${p?.tipo ?? ''}">${escapeHtml(p?.tipo ?? '')}</span></td>
     <td title="${escapeHtml(p?.contraparte ?? '')}">${escapeHtml(truncate(p?.contraparte ?? '', 40))}</td>
