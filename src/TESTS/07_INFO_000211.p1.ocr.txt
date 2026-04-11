@@ -1,0 +1,161 @@
+Cliente:
+
+>
+
+BRATUKH MAKSYM
+
+wa FUI PO
+
+CL/LAJIAL,7-176
+
+SANTIAGO DEL TEIDE
+
+STA CRUZ DE TENERIFE-ESPANA
+
+SUMINISTROS PLACAHOME, S.L
+
+CIF/DNI:
+
+Z2689577P
+
+B76716166
+
+POL. IND. LLANO DEL CAMELLO, C/ LA ISA, 59
+
+38639 - LAS CHAFIRAS, SAN MIGUEL TEL.: 822 201 605
+
+FACTURA
+
+eMail:atencionclientesuministros@placahome.com
+
+Serie
+
+Número
+
+Fecha
+
+Cliente
+
+eMail:suminitros@placahome.com
+
+181
+
+25/03/2026
+
+000986
+
+| Articulo
+
+| Descripción
+
+| Unidades | Precio
+
+|
+
+| %lgic |
+
+Importe
+
+|
+
+Albaran n°
+
+1824
+
+de fecha 25/03/2026
+
+638790
+
+MAESTRA 47/17X3000
+
+6,00
+
+2,539
+
+233201
+
+PERFIL U 30/30X3000
+
+7,00
+
+15,24
+
+4,00
+
+2,192
+
+7,00
+
+8,77
+
+ner eename
+
+SUMINISTROS PLACAHOME S.L |
+
+B- 76716135
+
+P|. Llano del Camello
+
+ClLa isa 59 - 38939 Las Chefiras
+
+-
+
+‘
+
+=)
+
+=
+
+I
+
+San Miguél de Abona
+
+Importe neto
+
+Base IGIC
+
+%IGIC
+
+Cuota IGIC
+
+24,01
+
+24,01
+
+7,00
+
+1,68
+
+Forma de pago
+
+SANTANDER: ES51 0049 1915 5928 1013 6416
+
+TOTAL (EUR) -
+
+25,69
+
+LA CAIXA: ES88 2100 4163 4613 0045 2083
+
+Vencimientos
+
+- Observaciones
+
+25/03/2026
+
+25,69
+
+NO SE ADMITEN DEVOLUIONES SIN FACTURA ORIGINAL O PASADOS QUINCE DIAS FECHA FACTURA
+
+OPERACION ASEGURADA CON CREDITO Y CAUCION - NO SE DESCARGA EL MATERIAL TRANSPORTADO
+
+Responsable: El responsable del tratamiento de sus datos es: SUMINISTROS PLACAHOME S.L., con CIF B76716166 y domicilio en Calle La Isa, 59, 38639 - LAS CHAFIRAS (SAN MIGUEL) (Santa Cruz de Tenerife
+
+):
+
+Finalidad: Los datos serán utilizados para gestión de nuestros clientes y cobro de los servicios y/o productos.
+
+Legitimación: Relación contractual.
+
+Destinatarios: Organismos obligados por Ley.
+
+Derechos: Puede ejercer sus derechos de acceso, rectificación, cancelación y oposición, portabilidad y limitación, a no ser objeto de decisiones automatizadas y a retirar el consentimiento prestado.
