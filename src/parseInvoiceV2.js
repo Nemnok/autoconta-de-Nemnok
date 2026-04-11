@@ -33,7 +33,7 @@ function ocrNifVariants(raw) {
   if (first === '1') variants.push('I' + restDigits);
   if (first === '5') variants.push('S' + restDigits);
   if (first === '4') variants.push('A' + restDigits);
-  if (first === '2') variants.push('Z' + restDigits);
+  if (first === '2') variants.push('Z' + restDigits); // OCR confuses Z with 2 in NIE documents
   const digitNorm = upper.replace(/O/g, '0').replace(/[IL]/g, '1').replace(/S/g, '5');
   if (digitNorm !== upper) variants.push(digitNorm);
   if (upper.length === 9) {
@@ -176,14 +176,8 @@ function findCompanyNamesInText(text) {
     
     // Remove leading non-alpha garbage
     name = name.replace(/^[^A-ZÁÉÍÓÚÑÜa-záéíóúñü]+/, '');
-    // Remove leading OCR garbage (short sequences of random uppercase chars + single letters)
+    // Remove leading OCR garbage: short uppercase + single letter prefixes
     // e.g., "DSS A LAS CHAFIRAS" → "LAS CHAFIRAS"
-    name = name.replace(/^(?:[A-Z]{1,4}\s+)*(?=[A-Z]{3,})/, (match) => {
-      // Only remove if it looks like garbage (not part of a real company name)
-      // A real company name usually has > 4 chars in the first word
-      return match;
-    });
-    // More targeted: remove "DSS A " or similar short uppercase + single letter prefixes
     name = name.replace(/^(?:[A-Z]{1,3}\s+[A-Z]\s+)+(?=[A-Z]{2,})/, '');
     
     if (name.length < 3) continue;
@@ -485,17 +479,14 @@ export function extractTotalV2(text) {
     }
   }
 
-  // "TOTAL\n\namount €" (Fijaciones Canarias)
+  // "amount €" — last occurrence in text (Fijaciones Canarias)
   {
-    const re = /\bTo[ií]al\s*\n+\s*[\d.,]+\s*\n+\s*[\d.,]+\s*\n+\s*[\d.,]+\s*\n/gi;
-    // Actually search for the € amount pattern
-    const re2 = /(\d{1,3}(?:\.\d{3})*,\d{2})\s*€/g;
+    const re = /(\d{1,3}(?:\.\d{3})*,\d{2})\s*€/g;
     let m2;
     let lastAmount = null;
-    while ((m2 = re2.exec(text)) !== null) {
+    while ((m2 = re.exec(text)) !== null) {
       lastAmount = m2[1];
     }
-    // Only use if not already found
     if (lastAmount) {
       const n = parseEuropeanNumber(lastAmount);
       if (!isNaN(n) && n < 1_000_000 && n > 0) return toEuropeanString(lastAmount);
@@ -738,7 +729,7 @@ function parseIgicTableRow(line) {
   let m;
   while ((m = numRe.exec(line)) !== null) {
     const raw = m[0];
-    if (/^\d{5,}$/.test(raw)) continue;
+    if (/^\d{5,}$/.test(raw)) continue; // Skip invoice/document numbers (5+ digits without decimal)
     numbers.push({ raw, value: parseEuropeanNumber(raw), pos: m.index });
   }
   if (numbers.length < 2) return null;
